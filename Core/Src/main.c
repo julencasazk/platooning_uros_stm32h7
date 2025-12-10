@@ -32,12 +32,11 @@
 #include <rmw_microros/rmw_microros.h>
 
 #include <std_msgs/msg/float64.h>
-#include <pid_message/msg/PID.h>
 
 #include <stdbool.h>
 
 
-#include "pid.h"
+#include "pid_stm32.h"
 
 /* USER CODE END Includes */
 
@@ -66,16 +65,22 @@ const osThreadAttr_t uROS_Task_attributes = {
   .priority = (osPriority_t) osPriorityNormal,
 };
 /* USER CODE BEGIN PV */
-rcl_publisher_t u_pub;
-rcl_subscription_t r_sub;
-rcl_subscription_t pv_sub;
-rcl_subscription_t pid_param_sub;
 
-std_msgs__msg__Float64 pv_msg;
+rcl_publisher_t throttle_pub;
+rcl_publisher_t brake_pub;
+
+rcl_subscription_t r_sub; // Speed setpoint
+rcl_subscription_t pv_sub; // Current speed reading
+rcl_subscription_t d_sub; // Distance to the car ahead
+
+// Message typedef to store readings in subscription callbacks
 std_msgs__msg__Float64 r_msg;
-std_msgs__msg__Float64 u_msg;
-pid_message__msg__PID  pid_param_msg;
+std_msgs__msg__Float64 pv_msg;
+std_msgs__msg__Float64 d_msg;
 
+// Message typedef to store data before publishing
+std_msgs__msg__Float64 throttle_msg;
+std_msgs__msg__Float64 brake_msg;
 
 
 rclc_support_t support;
@@ -83,11 +88,11 @@ rcl_allocator_t allocator;
 rcl_node_t node;
 rclc_executor_t executor;
 
+// Speed PID controller
 pid_controller_t speed_pid;
 
-bool controller_setup = false;
 uint32_t rx_count = 0;
-
+// TODO Remove button use, not useful in this project
 char BspButtonState = 0;
 
 
@@ -116,13 +121,6 @@ void * microros_zero_allocate(size_t number_of_elements, size_t size_of_element,
 /* USER CODE BEGIN 0 */
 
 
-void pid_param_sub_cb(const void* msgin)
-{
-    const pid_message__msg__PID * msg = (const pid_message__msg__PID*)msgin;
-    rx_count++;
-    printf("Sub callback count: %d\n", rx_count);
-}
-
 void r_sub_cb(const void* msgin)
 {
     const std_msgs__msg__Float64 * msg = (const std_msgs__msg__Float64*)msgin;
@@ -133,6 +131,14 @@ void pv_sub_cb(const void* msgin)
     const std_msgs__msg__Float64 * msg = (const std_msgs__msg__Float64*)msgin;
     new_sample_ready++;
 }
+
+void d_sub_cb(const void* msgin)
+{
+    const std_msgs__msg__Float64 * msg = (const std_msgs__msg__Float64*)msgin;
+    new_sample_ready++;
+}
+
+
 
 
 
@@ -403,9 +409,14 @@ void StartDefaultTask(void *argument)
     CHECK(rclc_node_init_default(&node, "pid_controller_node", "", &support));
 
     CHECK(rclc_publisher_init_best_effort(
-        &u_pub, &node,
+        &throttle_msg, &node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float64),
-        "u"));
+        "throttle_cmd"));
+
+    CHECK(rclc_publisher_init_best_effort(
+        &brake_msg, &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float64),
+        "brake_cmd"));
 
     CHECK(rclc_subscription_init_best_effort(
         &pv_sub, &node,
@@ -418,36 +429,42 @@ void StartDefaultTask(void *argument)
         "r"));
 
     CHECK(rclc_subscription_init_default(
-        &pid_param_sub, &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(pid_message, msg, PID),
-        "pid_params"));
+        &d_sub, &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float64),
+        "d"));
 
     executor = rclc_executor_get_zero_initialized_executor();
     CHECK(rclc_executor_init(&executor, &support.context, 7, &allocator));
 
     CHECK(rclc_executor_add_subscription(&executor, &pv_sub, &pv_msg, &pv_sub_cb, ON_NEW_DATA));
     CHECK(rclc_executor_add_subscription(&executor, &r_sub,  &r_msg,  &r_sub_cb, ON_NEW_DATA));
-    CHECK(rclc_executor_add_subscription(&executor, &pid_param_sub,  &pid_param_msg,  &pid_param_sub_cb, ON_NEW_DATA));
+    CHECK(rclc_executor_add_subscription(&executor, &d_sub, &d_msg, callback, ON_NEW_DATA));
 
-// Ensure XRCE session synchronized after creating entities
-rmw_uros_sync_session(1000);
+	// Ensure XRCE session synchronized after creating entities
+	rmw_uros_sync_session(1000);
 
-// Initial spin to confirm creation
-rclc_executor_spin_some(&executor, 10);
+	// Initial spin to confirm creation
+	rclc_executor_spin_some(&executor, 10);
 
-// Initialize messages explicitly
-pv_msg.data = 0.0f;
-r_msg.data  = -1.0f;
-u_msg.data  = 0.0f;
+	// Initialize messages explicitly
+	pv_msg.data = 0.0f;
+	r_msg.data  = 0.0f;
 
-pid_param_msg.kp = -1.0f;
-pid_param_msg.ki = -1.0f;
-pid_param_msg.kd = -1.0f;
-pid_param_msg.n = -1.0f;
 
-new_sample_ready = 0;
 
-    pid_init(&speed_pid, 0.0f, 0.0f, 0.0f, 0.0f, 0.01f);
+	new_sample_ready = 0;
+
+    pid_init(&speed_pid,
+    		// Values from PSO optimization algorithm
+    		// Hardcoding values is a lot easier than passing with micro-ROS,
+    		// and frees up the ROS pub/sub ammount.
+			2.59397071e-01f, 	// 	Kp
+			1.27381733e-01, 	//	Ki
+			6.21160744e-03, 	//	Kd
+			5.0f,				//	N
+			1.0f,				// 	kb_aw
+			0.01f				//	Ts
+	);
     pid_set_clampling(&speed_pid, 1.0f, 0.0f);
     pid_set_derivative_on_meas(&speed_pid, PID_DERIVATIVE_ON_MEASURE_ON);
     pid_set_derivative_discretization_method(&speed_pid, PID_DISCRETE_TUSTIN);
