@@ -14,7 +14,7 @@ It can act both as a follower or a leader.
 
 1. From the project's root dir, clone the PID message repo from [here](https://github.com/julencasazk/pid_msg)
 ```
-git clone https://github.com/julencasazk/pid_msg.git micro_ros_stm32cubemx_utils/microros_static_library/library_generation/extra_packages/
+git clone https://github.com/julencasazk/pid_gains_msg.git micro_ros_stm32cubemx_utils/microros_static_library/library_generation/extra_packages/
 ```
 
 2. Build the micro-ROS libraries with the official Docker lib builder.
