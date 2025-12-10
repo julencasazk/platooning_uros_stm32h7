@@ -1,0 +1,7 @@
+[submodule "Lib/pid_stm32"]
+	path = Lib/pid_stm32
+	url = git@github.com:julencasazk/pid_stm32.git
+[submodule "micro_ros_stm32cubemx_utils"]
+	path = micro_ros_stm32cubemx_utils
+  url = https://github.com/micro-ROS/micro_ros_stm32cubemx_utils.git
+  branch = humble
