@@ -39,8 +39,6 @@ COLCON_IGNORE
 *.rosinstall
 .micro_ros_build/
 .uros/
-micro_ros_stm32cubemx_utils/microros_static_library/libmicroros
-micro_ros_stm32cubemx_utils/microros_static_library/extra_packages
 
 ###############################################################################
 # CMake leftovers (sometimes pulled in by micro-ROS tools)
