@@ -17,17 +17,19 @@ It can act both as a follower or a leader.
 git clone --recurse-submodules https://github.com/julencasazk/platooning_uros_stm32h7.git
 ```
 
-1. From the project's root dir, clone the PID message repo from [here](https://github.com/julencasazk/pid_msg)
+2. From the project's root dir, clone the PID message repo from [here](https://github.com/julencasazk/pid_msg)
 ```
 git clone https://github.com/julencasazk/pid_gains_msg.git micro_ros_stm32cubemx_utils/microros_static_library/library_generation/extra_packages/pid_gains_message
 ```
 
-2. Build the micro-ROS libraries with the official Docker lib builder.
+3. Pull the official micro-ROS static library builder from Docker hub
 ```
 docker pull microros/micro_ros_static_library_builder:humble
+```
+4. Run it from the project's root directory 
+```
 docker run -it --rm -v $(pwd):/project --env MICROROS_LIBRARY_FOLDER=micro_ros_stm32cubemx_utils/microros_static_library microros/micro_ros_static_library_builder:humble
 ```
-
 You might need to use `sudo` depending on how your Docker is set up.
 
 You should get to a user input with something like this:
@@ -39,7 +41,7 @@ Found CFLAGS:
 Do you want to continue with them? (y/n)
 ```
 
-3. Build the project from the project's root dir with:
+5. Build the project from the project's root dir with:
 ```
 make all j$(nproc)
 ```
