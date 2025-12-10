@@ -12,6 +12,19 @@ It can act both as a follower or a leader.
 
 ## Usage
 
+1. Clone this repo and it's submodules recursively:
+```
+git clone --recurse-submodules https://github.com/julencasazk/platooning_uros_stm32h7.git
+```
+```
+```
+```
+```
+```
+```
+```
+```
+
 1. From the project's root dir, clone the PID message repo from [here](https://github.com/julencasazk/pid_msg)
 ```
 git clone https://github.com/julencasazk/pid_gains_msg.git micro_ros_stm32cubemx_utils/microros_static_library/library_generation/extra_packages/pid_gains_message
