@@ -16,14 +16,6 @@ It can act both as a follower or a leader.
 ```
 git clone --recurse-submodules https://github.com/julencasazk/platooning_uros_stm32h7.git
 ```
-```
-```
-```
-```
-```
-```
-```
-```
 
 1. From the project's root dir, clone the PID message repo from [here](https://github.com/julencasazk/pid_msg)
 ```
