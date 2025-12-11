@@ -26,19 +26,20 @@ typedef struct {
 
 
 typedef struct {
-	 PLATOON_member_type_TypeDef role;
-	 char* name;
+	 
+	PLATOON_member_type_TypeDef role;
+	const char* name;
 
-	 float time_headway;
-	 float min_spacing;
-	 float k_dist;
+	float time_headway;
+	float min_spacing;
+	float k_dist;
 
-	 PLATOON_member_state_t current_state;
+	PLATOON_member_state_t current_state;
 
-	 float (*get_speed)(void);
-	 float (*get_distance)(void);
+	float (*get_speed)(void);
+	float (*get_distance)(void);
 
-	 float (*get_controller_action)(float speed, float setpoint);
+	float (*get_controller_action)(float speed, float setpoint);
 
 } PLATOON_member_t;
 
