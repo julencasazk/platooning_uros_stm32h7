@@ -83,7 +83,6 @@ Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_ioreq.c \
 Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Src/usbd_cdc.c \
 Core/Src/sysmem.c \
 Core/Src/syscalls.c \
-Lib/pid_stm32/src/pid.c
 
 # ASM sources
 ASM_SOURCES =  \
@@ -139,8 +138,7 @@ AS_DEFS =
 C_DEFS =  \
 -DUSE_PWR_LDO_SUPPLY \
 -DUSE_HAL_DRIVER \
--DSTM32H753xx \
--DPID_USE_FLOAT64
+-DSTM32H753xx 
 
 
 
@@ -173,7 +171,6 @@ C_INCLUDES =  \
 -IMiddlewares/ST/STM32_USB_Device_Library/Class/CDC/Inc \
 -IDrivers/CMSIS/Device/ST/STM32H7xx/Include \
 -IDrivers/CMSIS/Include \
--ILib/pid_stm32/inc
 
 
 # compile gcc flags
@@ -220,6 +217,14 @@ C_SOURCES += micro_ros_stm32cubemx_utils/extra_sources/microros_transports/usb_c
 
 print_cflags:
 	@echo $(CFLAGS)
+
+#######################################
+# Platooning and PID addons
+#######################################
+C_INCLUDES += -ILib/pid_stm32/inc
+
+C_SOURCES += Core/Src/platooning.c
+C_SOURCES += Lib/pid_stm32/src/pid_stm32.c
 
 #######################################
 # build the application
