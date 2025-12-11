@@ -69,7 +69,7 @@ const osThreadAttr_t ctrlTask_attributes = { .name = "ctrlTask", .stack_size =
 /* USER CODE BEGIN PV */
 
 // Platoon participation config
-char *participant_name = "/veh_ego";
+const char *participant_name = "veh_ego";
 uint8_t participant_role = 1; // Follower
 
 rcl_publisher_t throttle_pub;
@@ -108,6 +108,8 @@ volatile uint8_t d_sample_rdy = 0;
 
 volatile uint8_t control_task_rdy = 0;
 volatile uint8_t uros_task_rdy = 0;
+
+volatile rcl_ret_t glob_ret = RCL_RET_OK;
 
 /* USER CODE END PV */
 
@@ -424,42 +426,53 @@ void StartUROSTask(void *argument) {
 	allocator = rcl_get_default_allocator();
 
 	//create init_options
+
 #define CHECK(fn) do { rcl_ret_t rc = (fn); if (rc != RCL_RET_OK) { \
     printf("RCL ERROR %d at %s:%d -> %s\n", (int)rc, __FILE__, __LINE__, rcl_get_error_string().str); \
     rcl_reset_error(); } } while(0)
 
-	CHECK(rclc_support_init(&support, 0, NULL, &allocator));
-	CHECK(
-			rclc_node_init_default(&node, strcat(participant_name, "_node"), "",
-					&support));
 
-	CHECK(
-			rclc_publisher_init_best_effort( &throttle_msg, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32), strcat(participant_name, "/command/throttle") ));
+	rclc_support_init(&support, 0, NULL, &allocator);
 
-	CHECK(
-			rclc_publisher_init_best_effort( &brake_msg, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32), strcat(participant_name, "/command/brake") ));
+	char tmpbuff[150];
+	strcpy(tmpbuff, participant_name);
 
-	CHECK(
-			rclc_subscription_init_best_effort( &pv_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32), strcat(participant_name, "/state/speed") ));
+	glob_ret = rclc_node_init_default(&node, strcat(tmpbuff, "_node"), "", &support);
+	strcpy(tmpbuff, participant_name);
 
-	CHECK(
-			rclc_subscription_init_default( &r_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32), strcat(participant_name, "/state/setpoint") ));
+	glob_ret = rclc_publisher_init_best_effort(&throttle_pub, &node,
+			ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
+			strcat(tmpbuff, "/command/throttle"));
 
-	CHECK(
-			rclc_subscription_init_default( &d_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32), strcat(participant_name, "/state/dist_to_veh") ));
+	strcpy(tmpbuff, participant_name);
+	glob_ret = rclc_publisher_init_best_effort(&throttle_pub, &node,
+			ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
+			strcat(tmpbuff, "/command/brake"));
+
+	strcpy(tmpbuff, participant_name);
+	glob_ret = rclc_subscription_init_best_effort(&pv_sub, &node,
+			ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
+			strcat(tmpbuff, "/state/speed"));
+
+	strcpy(tmpbuff, participant_name);
+	glob_ret = rclc_subscription_init_default(&r_sub, &node,
+			ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
+			strcat(tmpbuff, "/state/setpoint"));
+
+	strcpy(tmpbuff, participant_name);
+	glob_ret = rclc_subscription_init_default(&d_sub, &node,
+			ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
+			strcat(tmpbuff, "/state/dist_to_veh"));
 
 	executor = rclc_executor_get_zero_initialized_executor();
-	CHECK(rclc_executor_init(&executor, &support.context, 7, &allocator));
+	glob_ret = rclc_executor_init(&executor, &support.context, 7, &allocator);
 
-	CHECK(
-			rclc_executor_add_subscription(&executor, &pv_sub, &pv_msg,
-					&pv_sub_cb, ON_NEW_DATA));
-	CHECK(
-			rclc_executor_add_subscription(&executor, &r_sub, &r_msg, &r_sub_cb,
-					ON_NEW_DATA));
-	CHECK(
-			rclc_executor_add_subscription(&executor, &d_sub, &d_msg, &d_sub_cb,
-					ON_NEW_DATA));
+	glob_ret = rclc_executor_add_subscription(&executor, &pv_sub, &pv_msg, &pv_sub_cb,
+			ON_NEW_DATA);
+	glob_ret = rclc_executor_add_subscription(&executor, &r_sub, &r_msg, &r_sub_cb,
+			ON_NEW_DATA);
+	glob_ret = rclc_executor_add_subscription(&executor, &d_sub, &d_msg, &d_sub_cb,
+			ON_NEW_DATA);
 
 	// Ensure XRCE session synchronized after creating entities
 	rmw_uros_sync_session(1000);
@@ -543,7 +556,7 @@ void StartCrtlTask(void *argument) {
 	// Setup Platoon member handler
 	// ====================================================================
 	platoon_member.name = participant_name;
-	platoon_member.role = (PLATOON_member_type_TypeDef)participant_role;
+	platoon_member.role = (PLATOON_member_type_TypeDef) participant_role;
 
 	platoon_member.k_dist = 0.2f;
 	platoon_member.min_spacing = 5.0f;
@@ -559,7 +572,7 @@ void StartCrtlTask(void *argument) {
 	control_task_rdy = 1;
 
 	// Wait until uROS setup is done
-	while(uros_task_rdy != 1) {
+	while (uros_task_rdy != 1) {
 		vTaskDelay(xFreq);
 	}
 
