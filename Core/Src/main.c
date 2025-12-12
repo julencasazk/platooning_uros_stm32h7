@@ -32,6 +32,7 @@
 #include <rmw_microros/rmw_microros.h>
 
 #include <std_msgs/msg/float32.h>
+// #include <sts_msgs/msg/bool.h>
 
 #include <stdbool.h>
 #include <string.h>
@@ -54,6 +55,23 @@
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
 
+volatile rcl_ret_t g_last_rc = RCL_RET_OK;
+char g_last_err[128] = {0};
+
+#define CHECK(fn)                                                     \
+  do {                                                                \
+    rcl_ret_t rc_ = (fn);                                             \
+    if (rc_ != RCL_RET_OK) {                                          \
+      g_last_rc = rc_;                                                \
+      const rcl_error_string_t err = rcl_get_error_string();          \
+      strncpy(g_last_err, err.str, sizeof(g_last_err) - 1);           \
+      g_last_err[sizeof(g_last_err) - 1] = '\0';                      \
+      HAL_GPIO_WritePin(GPIOE, GPIO_PIN_1, GPIO_PIN_SET);             \
+	  printf("Error: %s\n", g_last_err);    						  \
+      __BKPT(0);                                                      \
+      while (1) { __NOP(); }                                          \
+    }                                                                 \
+  } while (0)
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -70,7 +88,8 @@ const osThreadAttr_t ctrlTask_attributes = { .name = "ctrlTask", .stack_size =
 
 // Platoon participation config
 const char *participant_name = "veh_ego";
-uint8_t participant_role = 1; // Follower
+PLATOON_member_type_TypeDef participant_role = _PLATOON_FOLLOWER; 
+PLATOON_platoon_enabled_TypeDef in_platoon = _PLATOON_ENABLED; 
 
 rcl_publisher_t throttle_pub;
 rcl_publisher_t brake_pub;
@@ -78,11 +97,15 @@ rcl_publisher_t brake_pub;
 rcl_subscription_t r_sub; // Speed setpoint
 rcl_subscription_t pv_sub; // Current speed reading
 rcl_subscription_t d_sub; // Distance to the car ahead
+rcl_subscription_t plat_r_sub; // Platoon speed setpoint
+// rcl_subscription_t in_platoon_msg; // For later >:P
 
 // Message typedef to store readings in subscription callbacks
 volatile std_msgs__msg__Float32 r_msg;
+volatile std_msgs__msg__Float32 plat_r_msg;
 volatile std_msgs__msg__Float32 pv_msg;
 volatile std_msgs__msg__Float32 d_msg;
+// volatile sts_msgs__msg__Bool in_platoon_msg; // For later >:P
 
 // Message typedef to store data before publishing
 volatile std_msgs__msg__Float32 throttle_msg;
@@ -144,6 +167,7 @@ float uros_get_controller_action(float speed, float setpoint);
 
 // micro-ROS topic callback functions
 // ======================================================================
+// Both for platoon and local setpoint
 void r_sub_cb(const void *msgin) {
 	const std_msgs__msg__Float32 *msg = (const std_msgs__msg__Float32*) msgin;
 }
@@ -164,13 +188,6 @@ void d_sub_cb(const void *msgin) {
 // Platooning function implementations
 // ========================================================================
 
-float uros_get_speed(void) {
-	return pv_msg.data;
-}
-
-float uros_get_dist() {
-	return d_msg.data;
-}
 
 float uros_get_controller_action(float speed, float setpoint) {
 	return pid_run(&speed_pid, setpoint, speed);
@@ -394,7 +411,7 @@ void StartUROSTask(void *argument) {
 	/*
 	 * Turn off LEDs. Not needed but whatever
 	 */
-	HAL_GPIO_WritePin(GPIOE, GPIO_PIN_1, GPIO_PIN_RESET);
+	HAL_GPIO_WritePin(GPIOE, GPIO_PIN_1, GPIO_PIN_RESET); // Orange LED??
 	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);
 
 	rmw_uros_set_custom_transport(
@@ -419,6 +436,8 @@ void StartUROSTask(void *argument) {
 
 	if (!rcutils_set_default_allocator(&freeRTOS_allocator)) {
 		printf("Error on default allocators (line %d)\n", __LINE__);
+		__BKPT(0);
+		while (1) {__NOP();}
 	}
 
 	// micro-ROS app
@@ -427,52 +446,54 @@ void StartUROSTask(void *argument) {
 
 	//create init_options
 
-#define CHECK(fn) do { rcl_ret_t rc = (fn); if (rc != RCL_RET_OK) { \
-    printf("RCL ERROR %d at %s:%d -> %s\n", (int)rc, __FILE__, __LINE__, rcl_get_error_string().str); \
-    rcl_reset_error(); } } while(0)
 
-
-	rclc_support_init(&support, 0, NULL, &allocator);
+	CHECK(rclc_support_init(&support, 0, NULL, &allocator));
 
 	char tmpbuff[150];
 	strcpy(tmpbuff, participant_name);
 
-	glob_ret = rclc_node_init_default(&node, strcat(tmpbuff, "_node"), "", &support);
+	CHECK(rclc_node_init_default(&node,"veh_ego_node", "", &support));
 	strcpy(tmpbuff, participant_name);
 
-	glob_ret = rclc_publisher_init_best_effort(&throttle_pub, &node,
+	CHECK(rclc_publisher_init_default(&throttle_pub, &node,
 			ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
-			strcat(tmpbuff, "/command/throttle"));
+			"veh_ego/command/throttle"));
 
 	strcpy(tmpbuff, participant_name);
-	glob_ret = rclc_publisher_init_best_effort(&throttle_pub, &node,
+	CHECK(rclc_publisher_init_default(&brake_pub, &node,
 			ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
-			strcat(tmpbuff, "/command/brake"));
+			"veh_ego/command/brake"));
 
 	strcpy(tmpbuff, participant_name);
-	glob_ret = rclc_subscription_init_best_effort(&pv_sub, &node,
+	CHECK(rclc_subscription_init_default(&pv_sub, &node,
 			ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
-			strcat(tmpbuff, "/state/speed"));
+			"veh_ego/state/speed"));
 
 	strcpy(tmpbuff, participant_name);
-	glob_ret = rclc_subscription_init_default(&r_sub, &node,
+	CHECK(rclc_subscription_init_default(&r_sub, &node,
 			ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
-			strcat(tmpbuff, "/state/setpoint"));
+			"veh_ego/state/setpoint"));
+
+	CHECK(rclc_subscription_init_default(&plat_r_sub, &node,
+			ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
+			"platoon/plat_0/setpoint")); // TODO hardcoded platoon ID, must be changable later
 
 	strcpy(tmpbuff, participant_name);
-	glob_ret = rclc_subscription_init_default(&d_sub, &node,
+	CHECK(rclc_subscription_init_default(&d_sub, &node,
 			ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
-			strcat(tmpbuff, "/state/dist_to_veh"));
+			"veh_ego/state/dist_to_veh"));
 
 	executor = rclc_executor_get_zero_initialized_executor();
-	glob_ret = rclc_executor_init(&executor, &support.context, 7, &allocator);
+	CHECK(rclc_executor_init(&executor, &support.context, 7, &allocator));
 
-	glob_ret = rclc_executor_add_subscription(&executor, &pv_sub, &pv_msg, &pv_sub_cb,
-			ON_NEW_DATA);
-	glob_ret = rclc_executor_add_subscription(&executor, &r_sub, &r_msg, &r_sub_cb,
-			ON_NEW_DATA);
-	glob_ret = rclc_executor_add_subscription(&executor, &d_sub, &d_msg, &d_sub_cb,
-			ON_NEW_DATA);
+	CHECK(rclc_executor_add_subscription(&executor, &pv_sub, &pv_msg, &pv_sub_cb,
+			ON_NEW_DATA));
+	CHECK(rclc_executor_add_subscription(&executor, &r_sub, &r_msg, &r_sub_cb,
+			ON_NEW_DATA));
+	CHECK(rclc_executor_add_subscription(&executor, &plat_r_sub, &plat_r_msg, &r_sub_cb,
+			ON_NEW_DATA));
+	CHECK(rclc_executor_add_subscription(&executor, &d_sub, &d_msg, &d_sub_cb,
+			ON_NEW_DATA));
 
 	// Ensure XRCE session synchronized after creating entities
 	rmw_uros_sync_session(1000);
@@ -485,6 +506,7 @@ void StartUROSTask(void *argument) {
 	// Initialize messages explicitly
 	pv_msg.data = 0.0f;
 	r_msg.data = 0.0f;
+	plat_r_msg.data = 0.0f;
 	throttle_msg.data = 0.0f;
 	brake_msg.data = 0.0f;
 
@@ -543,7 +565,7 @@ void StartCrtlTask(void *argument) {
 	// Controller clamping, positive should result in throttle
 	// negative in brake, though brake should be carefully
 	// calibrated, as PID wants to floor it.
-	pid_set_clampling(&speed_pid, 1.0f, -1.0f);
+	pid_set_clamping(&speed_pid, 1.0f, -1.0f);
 	// Avoid huge jumps when setpoint changes suddenly
 	pid_set_derivative_on_meas(&speed_pid, _PID_DERIVATIVE_ON_MEASURE_ON);
 	// Set most appropriate discretization methods for each component
@@ -556,14 +578,20 @@ void StartCrtlTask(void *argument) {
 	// Setup Platoon member handler
 	// ====================================================================
 	platoon_member.name = participant_name;
-	platoon_member.role = (PLATOON_member_type_TypeDef) participant_role;
+	platoon_member.role = participant_role;
+	platoon_member.is_platooning = in_platoon; 
 
 	platoon_member.k_dist = 0.2f;
 	platoon_member.min_spacing = 5.0f;
 	platoon_member.time_headway = 0.5f;
 
-	platoon_member.get_distance = uros_get_dist;
-	platoon_member.get_speed = uros_get_speed;
+	platoon_member.current_state = (PLATOON_member_state_t){
+	 .speed = &(pv_msg.data),
+	 .indiv_setpoint = &(r_msg.data),
+	 .distance_to_front_veh = &(d_msg.data),
+	 .platoon_setpoint = &(plat_r_msg.data)
+	};
+
 	platoon_member.get_controller_action = uros_get_controller_action;
 
 	// ====================================================================
@@ -578,7 +606,7 @@ void StartCrtlTask(void *argument) {
 
 	for (;;) {
 
-		PLATOON_command_t cmd = compute_control(&platoon_member, r_msg.data);
+		PLATOON_command_t cmd = compute_control(&platoon_member);
 
 		throttle_msg.data = cmd.throttle_cmd;
 		brake_msg.data = cmd.brake_cmd;
