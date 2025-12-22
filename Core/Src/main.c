@@ -130,14 +130,14 @@ rclc_executor_t executor;
 pid_controller_t speed_pid;
 // PID gains for different speeds
 PID_Gains_TypeDef low_gains = {
-	.kd = 0.43127789,
+	.kp = 0.43127789,
 	.ki = 0.43676547,
 	.kd = 0.0,
 	.n = 15.0
 };
 
 PID_Gains_TypeDef mid_gains = {
-	.kd = 0.11675119,
+	.kp = 0.11675119,
 	.ki = 0.085938,
 	.kd = 0.0,
 	.n = 14.90530836
@@ -156,6 +156,9 @@ float thresh_mid_high = 22.22222f;
 
 // Histeresis band in m/s
 float hist = 1.0f;
+
+int8_t current_range; // 0-> Low, 1-> Mid, 2 -> High 
+int8_t prev_range;
 
 // Platoon member
 PLATOON_member_t platoon_member;
@@ -793,6 +796,9 @@ void StartCrtlTask(void *argument) {
 	float throttle_out = 0.0f;
 	float brake_out = 0.0f;
 
+	current_range = 0;
+	prev_range = 0;
+
 	control_task_rdy = 1;
 
 	// Wait until uROS setup is done
@@ -820,6 +826,49 @@ void StartCrtlTask(void *argument) {
 		}
 
 		if (speed_ok) {
+
+			prev_range = current_range;
+			// Update current range depending on speed +- histeresis
+			// Only reset pid state when changing PID
+
+			// TODO		Make current_range work as an index,instead of switch-case
+			switch (current_range)
+			{
+			case 0:
+				if (in.speed_mps > ( thresh_low_mid + hist )) current_range = 1;
+				break;
+			case 1:
+				if (in.speed_mps > (thresh_mid_high + hist)) { current_range = 2; } 
+				else if (in.speed_mps < thresh_low_mid - hist) { current_range = 0; }
+				break;
+			case 2:
+				if (in.speed_mps < (thresh_mid_high - hist)) current_range = 1;
+				break;
+			default:
+				break;
+			}
+
+			// Change PID gains to corresponding range
+			// TODO 	Change so that current_range acts as an index
+			//	on an array of PID gains
+			if (current_range != prev_range){
+				switch (current_range)
+				{
+					case 0:
+						set_gains_local(&speed_pid, &low_gains);
+						break;
+					case 1:	
+						set_gains_local(&speed_pid, &mid_gains);
+						break;
+					case 2:
+						set_gains_local(&speed_pid, &high_gains);
+						break;
+					default:
+						break;
+				}
+			}
+
+
 			PLATOON_command_t cmd = compute_control(&platoon_member, &in);
 			throttle_out = cmd.throttle_cmd;
 			brake_out = cmd.brake_cmd;
