@@ -45,6 +45,16 @@
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
 
+typedef struct
+{
+	float kp;
+	float ki;
+	float kd;
+	float n;
+
+} PID_Gains_TypeDef;
+
+
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -83,7 +93,7 @@ const osThreadAttr_t uROSTask_attributes = { .name = "uROSTask", .stack_size =
 /* Definitions for ctrlTask */
 osThreadId_t ctrlTaskHandle;
 const osThreadAttr_t ctrlTask_attributes = { .name = "ctrlTask", .stack_size =
-		128 * 4, .priority = (osPriority_t) osPriorityBelowNormal7, };
+		256 * 4, .priority = (osPriority_t) osPriorityAboveNormal, };
 /* USER CODE BEGIN PV */
 
 // Platoon participation config
@@ -101,15 +111,15 @@ rcl_subscription_t plat_r_sub; // Platoon speed setpoint
 // rcl_subscription_t in_platoon_msg; // For later >:P
 
 // Message typedef to store readings in subscription callbacks
-volatile std_msgs__msg__Float32 r_msg;
-volatile std_msgs__msg__Float32 plat_r_msg;
-volatile std_msgs__msg__Float32 pv_msg;
-volatile std_msgs__msg__Float32 d_msg;
+std_msgs__msg__Float32 r_msg;
+std_msgs__msg__Float32 plat_r_msg;
+std_msgs__msg__Float32 pv_msg;
+std_msgs__msg__Float32 d_msg;
 // volatile sts_msgs__msg__Bool in_platoon_msg; // For later >:P
 
 // Message typedef to store data before publishing
-volatile std_msgs__msg__Float32 throttle_msg;
-volatile std_msgs__msg__Float32 brake_msg;
+std_msgs__msg__Float32 throttle_msg;
+std_msgs__msg__Float32 brake_msg;
 
 rclc_support_t support;
 rcl_allocator_t allocator;
@@ -118,6 +128,34 @@ rclc_executor_t executor;
 
 // Speed PID controller
 pid_controller_t speed_pid;
+// PID gains for different speeds
+PID_Gains_TypeDef low_gains = {
+	.kd = 0.43127789,
+	.ki = 0.43676547,
+	.kd = 0.0,
+	.n = 15.0
+};
+
+PID_Gains_TypeDef mid_gains = {
+	.kd = 0.11675119,
+	.ki = 0.085938,
+	.kd = 0.0,
+	.n = 14.90530836
+};
+
+PID_Gains_TypeDef high_gains = {
+	.kp = 0.13408096,
+	.ki = 0.07281374,
+	.kd =  0.0,
+	.n = 12.16810135
+};
+
+// Speed range thresholds
+float thresh_low_mid = 11.11111f;
+float thresh_mid_high = 22.22222f;
+
+// Histeresis band in m/s
+float hist = 1.0f;
 
 // Platoon member
 PLATOON_member_t platoon_member;
@@ -125,9 +163,6 @@ PLATOON_member_t platoon_member;
 uint32_t rx_count = 0;
 // TODO Remove button use, not useful in this project
 char BspButtonState = 0;
-
-volatile uint8_t pv_sample_rdy = 0;
-volatile uint8_t d_sample_rdy = 0;
 
 volatile uint8_t control_task_rdy = 0;
 volatile uint8_t uros_task_rdy = 0;
@@ -160,26 +195,154 @@ float uros_get_speed(void);
 float uros_get_dist(void);
 float uros_get_controller_action(float speed, float setpoint);
 
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+typedef struct {
+	volatile uint32_t seq;
+	volatile float speed_mps;
+	volatile float dist_to_front_m;
+	volatile float indiv_setpoint_mps;
+	volatile float platoon_setpoint_mps;
+	volatile TickType_t speed_tick;
+	volatile TickType_t dist_tick;
+	volatile TickType_t indiv_setpoint_tick;
+	volatile TickType_t platoon_setpoint_tick;
+} platoon_input_mailbox_t;
+
+typedef struct {
+	volatile uint32_t seq;
+	volatile float throttle;
+	volatile float brake;
+	volatile TickType_t computed_tick;
+} platoon_output_mailbox_t;
+
+static platoon_input_mailbox_t g_in_mb = { 0 };
+static platoon_output_mailbox_t g_out_mb = { 0 };
+
+static inline void in_mb_write_begin(void) { g_in_mb.seq++; }
+static inline void in_mb_write_end(void) { g_in_mb.seq++; }
+static inline void out_mb_write_begin(void) { g_out_mb.seq++; }
+static inline void out_mb_write_end(void) { g_out_mb.seq++; }
+
+static bool in_mb_read_snapshot(PLATOON_inputs_t *out,
+		TickType_t *speed_tick,
+		TickType_t *dist_tick,
+		TickType_t *indiv_setpoint_tick,
+		TickType_t *platoon_setpoint_tick) {
+	if (out == NULL) {
+		return false;
+	}
+
+	for (uint32_t tries = 0; tries < 8; tries++) {
+		uint32_t s1 = g_in_mb.seq;
+		if (s1 & 1u) {
+			continue;
+		}
+
+		out->speed_mps = g_in_mb.speed_mps;
+		out->distance_to_front_m = g_in_mb.dist_to_front_m;
+		out->indiv_setpoint_mps = g_in_mb.indiv_setpoint_mps;
+		out->platoon_setpoint_mps = g_in_mb.platoon_setpoint_mps;
+
+		if (speed_tick) {
+			*speed_tick = g_in_mb.speed_tick;
+		}
+		if (dist_tick) {
+			*dist_tick = g_in_mb.dist_tick;
+		}
+		if (indiv_setpoint_tick) {
+			*indiv_setpoint_tick = g_in_mb.indiv_setpoint_tick;
+		}
+		if (platoon_setpoint_tick) {
+			*platoon_setpoint_tick = g_in_mb.platoon_setpoint_tick;
+		}
+
+		uint32_t s2 = g_in_mb.seq;
+		if (s1 == s2) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static bool out_mb_read_snapshot(float *throttle, float *brake) {
+	if (throttle == NULL || brake == NULL) {
+		return false;
+	}
+
+	for (uint32_t tries = 0; tries < 8; tries++) {
+		uint32_t s1 = g_out_mb.seq;
+		if (s1 & 1u) {
+			continue;
+		}
+
+		*throttle = g_out_mb.throttle;
+		*brake = g_out_mb.brake;
+
+		uint32_t s2 = g_out_mb.seq;
+		if (s1 == s2) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static inline float ramp_towards_zero(float value, float step) {
+	if (value > step) {
+		return value - step;
+	}
+	return 0.0f;
+}
+
+// Helper function to set gains of the speed PID depending on threshold +- histeresis
+pid_err_t set_gains_local(pid_controller_t* pid,PID_Gains_TypeDef* gains) 
+{
+	pid_set_kp(pid, gains->kp);
+	pid_set_ki(pid, gains->ki);
+	pid_set_kd(pid, gains->kd);
+	pid_set_n(pid, gains->n);
+	pid_reset(pid);
+	return _PID_OK;
+}
+
 // micro-ROS topic callback functions
 // ======================================================================
-// Both for platoon and local setpoint
-void r_sub_cb(const void *msgin) {
+void indiv_setpoint_sub_cb(const void *msgin) {
 	const std_msgs__msg__Float32 *msg = (const std_msgs__msg__Float32*) msgin;
+	in_mb_write_begin();
+	g_in_mb.indiv_setpoint_mps = msg->data;
+	g_in_mb.indiv_setpoint_tick = xTaskGetTickCount();
+	in_mb_write_end();
+}
+
+void platoon_setpoint_sub_cb(const void *msgin) {
+	const std_msgs__msg__Float32 *msg = (const std_msgs__msg__Float32*) msgin;
+	in_mb_write_begin();
+	g_in_mb.platoon_setpoint_mps = msg->data;
+	g_in_mb.platoon_setpoint_tick = xTaskGetTickCount();
+	in_mb_write_end();
 }
 
 void pv_sub_cb(const void *msgin) {
 	const std_msgs__msg__Float32 *msg = (const std_msgs__msg__Float32*) msgin;
-	pv_sample_rdy++;
+	in_mb_write_begin();
+	g_in_mb.speed_mps = msg->data;
+	g_in_mb.speed_tick = xTaskGetTickCount();
+	in_mb_write_end();
 }
 
 void d_sub_cb(const void *msgin) {
 	const std_msgs__msg__Float32 *msg = (const std_msgs__msg__Float32*) msgin;
-	d_sample_rdy++;
+	in_mb_write_begin();
+	g_in_mb.dist_to_front_m = msg->data;
+	g_in_mb.dist_tick = xTaskGetTickCount();
+	in_mb_write_end();
 }
 
 // =========================================================================
@@ -488,9 +651,9 @@ void StartUROSTask(void *argument) {
 
 	CHECK(rclc_executor_add_subscription(&executor, &pv_sub, &pv_msg, &pv_sub_cb,
 			ON_NEW_DATA));
-	CHECK(rclc_executor_add_subscription(&executor, &r_sub, &r_msg, &r_sub_cb,
+	CHECK(rclc_executor_add_subscription(&executor, &r_sub, &r_msg, &indiv_setpoint_sub_cb,
 			ON_NEW_DATA));
-	CHECK(rclc_executor_add_subscription(&executor, &plat_r_sub, &plat_r_msg, &r_sub_cb,
+	CHECK(rclc_executor_add_subscription(&executor, &plat_r_sub, &plat_r_msg, &platoon_setpoint_sub_cb,
 			ON_NEW_DATA));
 	CHECK(rclc_executor_add_subscription(&executor, &d_sub, &d_msg, &d_sub_cb,
 			ON_NEW_DATA));
@@ -510,29 +673,54 @@ void StartUROSTask(void *argument) {
 	throttle_msg.data = 0.0f;
 	brake_msg.data = 0.0f;
 
-	// Start immediately at 1 ms for low latency. Must be faster than PV reading freq, if not will hang and
-	// behaviour will not reflect tuning
-	TickType_t xFreq = pdMS_TO_TICKS(1);
+	// Initialize mailboxes to known values and mark them as fresh "now".
+	TickType_t now = xTaskGetTickCount();
+	in_mb_write_begin();
+	g_in_mb.speed_mps = 0.0f;
+	g_in_mb.dist_to_front_m = 0.0f;
+	g_in_mb.indiv_setpoint_mps = 0.0f;
+	g_in_mb.platoon_setpoint_mps = 0.0f;
+	g_in_mb.speed_tick = now;
+	g_in_mb.dist_tick = now;
+	g_in_mb.indiv_setpoint_tick = now;
+	g_in_mb.platoon_setpoint_tick = now;
+	in_mb_write_end();
+
+	out_mb_write_begin();
+	g_out_mb.throttle = 0.0f;
+	g_out_mb.brake = 0.0f;
+	g_out_mb.computed_tick = now;
+	out_mb_write_end();
+
+	// Low-latency executor spin; publish at fixed rate.
+	const TickType_t spinPeriod = pdMS_TO_TICKS(1);
+	const TickType_t pubPeriod = pdMS_TO_TICKS(10);
+	TickType_t lastWake = now;
+	TickType_t lastPub = now;
 
 	uros_task_rdy = 1;
 
 	// Wait until the controller and platoon setup is finished
 	while (control_task_rdy != 1) {
-		vTaskDelay(xFreq);
+		vTaskDelay(spinPeriod);
 	}
 
 	for (;;) {
-		//vTaskDelayUntil(&xLastWakeTime, xFreq); // For real-time physical plant
-		vTaskDelay(xFreq);
-		rclc_executor_spin_some(&executor, 5);
+		vTaskDelayUntil(&lastWake, spinPeriod);
+		rclc_executor_spin_some(&executor, 2);
 
-		if (pv_sample_rdy) {
-			pv_sample_rdy = 0;
+		now = xTaskGetTickCount();
+		if ((TickType_t) (now - lastPub) >= pubPeriod) {
+			lastPub += pubPeriod;
+
+			float throttle = 0.0f;
+			float brake = 0.0f;
+			(void) out_mb_read_snapshot(&throttle, &brake);
+			throttle_msg.data = throttle;
+			brake_msg.data = brake;
 
 			CHECK(rcl_publish(&throttle_pub, &throttle_msg, NULL));
-
 			CHECK(rcl_publish(&brake_pub, &brake_msg, NULL));
-
 		}
 	}
 	/* USER CODE END 5 */
@@ -553,10 +741,12 @@ void StartCrtlTask(void *argument) {
 	// Values from PSO optimization algorithm
 	// Hardcoding values is a lot easier than passing with micro-ROS,
 	// and frees up the ROS pub/sub ammount.
-			2.59397071e-01f,// 	Kp
-			1.27381733e-01, 	//	Ki
-			6.21160744e-03, 	//	Kd
-			5.0f,				//	N
+
+	// Low speed state is supposed, as all CARLA test start on stop state.
+			0.0f,
+			0.0f,
+			0.0f,
+			0.0f,				
 			0.01f				//	Ts
 			);
 	// Integral anti windup
@@ -573,6 +763,11 @@ void StartCrtlTask(void *argument) {
 	pid_set_integral_discretization_method(&speed_pid,
 			_PID_DISCRETE_BACKWARD_EULER);
 
+	
+	// By default a low threshold is supposed, as all CARLA
+	// tests start at a stop state
+	set_gains_local(&speed_pid, &low_gains);
+
 	// ====================================================================
 
 	// Setup Platoon member handler
@@ -581,37 +776,65 @@ void StartCrtlTask(void *argument) {
 	platoon_member.role = participant_role;
 	platoon_member.is_platooning = in_platoon; 
 
-	platoon_member.k_dist = 0.2f;
+	platoon_member.k_dist = 5.0f; // Should match Python platoon members
 	platoon_member.min_spacing = 5.0f;
 	platoon_member.time_headway = 0.5f;
-
-	platoon_member.current_state = (PLATOON_member_state_t){
-	 .speed = &(pv_msg.data),
-	 .indiv_setpoint = &(r_msg.data),
-	 .distance_to_front_veh = &(d_msg.data),
-	 .platoon_setpoint = &(plat_r_msg.data)
-	};
 
 	platoon_member.get_controller_action = uros_get_controller_action;
 
 	// ====================================================================
-	TickType_t xFreq = pdMS_TO_TICKS(1);
+	const TickType_t ctrlPeriod = pdMS_TO_TICKS(10);
+	TickType_t lastTick = xTaskGetTickCount();
+
+	const TickType_t speedStale = pdMS_TO_TICKS(50);
+	const TickType_t distStale = pdMS_TO_TICKS(100);
+	const float rampStep = 0.05f;
+
+	float throttle_out = 0.0f;
+	float brake_out = 0.0f;
 
 	control_task_rdy = 1;
 
 	// Wait until uROS setup is done
 	while (uros_task_rdy != 1) {
-		vTaskDelay(xFreq);
+		vTaskDelay(ctrlPeriod);
 	}
 
 	for (;;) {
+		vTaskDelayUntil(&lastTick, ctrlPeriod);
 
-		PLATOON_command_t cmd = compute_control(&platoon_member);
+		PLATOON_inputs_t in = { 0 };
+		TickType_t speed_tick = 0;
+		TickType_t dist_tick = 0;
+		TickType_t indiv_sp_tick = 0;
+		TickType_t platoon_sp_tick = 0;
+		(void) in_mb_read_snapshot(&in, &speed_tick, &dist_tick, &indiv_sp_tick,
+				&platoon_sp_tick);
 
-		throttle_msg.data = cmd.throttle_cmd;
-		brake_msg.data = cmd.brake_cmd;
+		TickType_t now = xTaskGetTickCount();
+		bool speed_ok = ((TickType_t) (now - speed_tick) <= speedStale);
+		bool dist_ok = ((TickType_t) (now - dist_tick) <= distStale);
 
-		vTaskDelay(xFreq);
+		if (!dist_ok) {
+			in.distance_to_front_m = 0.0f;
+		}
+
+		if (speed_ok) {
+			PLATOON_command_t cmd = compute_control(&platoon_member, &in);
+			throttle_out = cmd.throttle_cmd;
+			brake_out = cmd.brake_cmd;
+		} else {
+			// Very simple freshness policy: if speed is stale, ramp actuator outputs to zero
+			// if, for some reason, data read fails repeatedly.
+			throttle_out = ramp_towards_zero(throttle_out, rampStep);
+			brake_out = ramp_towards_zero(brake_out, rampStep);
+		}
+
+		out_mb_write_begin();
+		g_out_mb.throttle = throttle_out;
+		g_out_mb.brake = brake_out;
+		g_out_mb.computed_tick = now;
+		out_mb_write_end();
 	}
 	/* USER CODE END StartCrtlTask */
 }

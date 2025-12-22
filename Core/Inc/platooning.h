@@ -18,14 +18,12 @@ typedef enum {
 	_PLATOON_ENABLED = 1   // Standard platoon mode
 } PLATOON_platoon_enabled_TypeDef;
 
-// Each member points to a local data object that changes, this way
-// it does not need manual updating constantly.
 typedef struct {
-	volatile float* speed;
-	volatile float* indiv_setpoint;
-	volatile float* distance_to_front_veh;
-	volatile float* platoon_setpoint;
-} PLATOON_member_state_t;
+	float speed_mps;
+	float distance_to_front_m; // <= 0.0f means invalid/unavailable
+	float indiv_setpoint_mps;
+	float platoon_setpoint_mps;
+} PLATOON_inputs_t;
 
 typedef struct {
 	float throttle_cmd;
@@ -36,7 +34,6 @@ typedef struct {
 	 
 	PLATOON_member_type_TypeDef role;
 	PLATOON_platoon_enabled_TypeDef is_platooning;
-	PLATOON_member_state_t current_state;
 	const char* name;
 
 	float time_headway;
@@ -49,8 +46,8 @@ typedef struct {
 } PLATOON_member_t;
 
 
-PLATOON_member_state_t get_state(PLATOON_member_t* member);
-PLATOON_command_t compute_control(PLATOON_member_t* member);
+PLATOON_command_t compute_control(const PLATOON_member_t* member,
+		const PLATOON_inputs_t* in);
 
 #ifdef __cplusplus
 }
