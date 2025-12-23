@@ -96,6 +96,47 @@ const osThreadAttr_t ctrlTask_attributes = { .name = "ctrlTask", .stack_size =
 		256 * 4, .priority = (osPriority_t) osPriorityAboveNormal, };
 /* USER CODE BEGIN PV */
 
+// DEBUGGING vars
+// ---- Timing debug (ticks; with 1kHz tick, 1 tick ~= 1ms) ----
+volatile TickType_t g_dbg_ctrl_tick = 0;
+volatile TickType_t g_dbg_uros_tick = 0;
+
+volatile TickType_t g_dbg_ctrl_period_ticks = 0;
+volatile TickType_t g_dbg_uros_spin_period_ticks = 0;
+
+volatile TickType_t g_dbg_uros_last_pub_tick = 0;
+volatile TickType_t g_dbg_ctrl_phase_since_pub_ticks = 0;
+
+volatile TickType_t g_dbg_ctrl_speed_age_ticks = 0;
+volatile TickType_t g_dbg_ctrl_dist_age_ticks = 0;
+volatile TickType_t g_dbg_ctrl_platoon_sp_age_ticks = 0;
+volatile TickType_t g_dbg_ctrl_speed_age_ticks_max = 0;
+volatile TickType_t g_dbg_ctrl_dist_age_ticks_max = 0;
+volatile TickType_t g_dbg_ctrl_platoon_sp_age_ticks_max = 0;
+volatile TickType_t g_dbg_ctrl_speed_age_ticks_min = 0xFFFFFFFFu;
+volatile TickType_t g_dbg_ctrl_dist_age_ticks_min = 0xFFFFFFFFu;
+volatile TickType_t g_dbg_ctrl_platoon_sp_age_ticks_min = 0xFFFFFFFFu;
+
+volatile TickType_t g_dbg_uros_cmd_age_ticks = 0;       
+volatile TickType_t g_dbg_uros_cmd_age_min_ticks = 0xFFFFFFFFu;
+volatile TickType_t g_dbg_uros_cmd_age_max_ticks = 0;
+
+volatile uint32_t g_dbg_uros_publish_count = 0;
+volatile uint32_t g_dbg_ctrl_compute_count = 0;
+
+// DEBUG -------------------------------
+// Hz debug: callback rates measured over a 1s tick window.
+volatile uint32_t g_dbg_speed_cb_count_total = 0;
+volatile uint32_t g_dbg_dist_cb_count_total = 0;
+volatile uint32_t g_dbg_platoon_sp_cb_count_total = 0;
+
+volatile uint32_t g_dbg_speed_hz_1s = 0;
+volatile uint32_t g_dbg_dist_hz_1s = 0;
+volatile uint32_t g_dbg_platoon_sp_hz_1s = 0;
+
+volatile TickType_t g_dbg_hz_window_start_tick = 0;
+// DEBUG -------------------------------
+
 // Platoon participation config
 const char *participant_name = "veh_ego";
 PLATOON_member_type_TypeDef participant_role = _PLATOON_FOLLOWER; 
@@ -326,14 +367,21 @@ void indiv_setpoint_sub_cb(const void *msgin) {
 
 void platoon_setpoint_sub_cb(const void *msgin) {
 	const std_msgs__msg__Float32 *msg = (const std_msgs__msg__Float32*) msgin;
+	// DEBUG -------------------------------
+	g_dbg_platoon_sp_cb_count_total++;
+	// DEBUG -------------------------------
 	in_mb_write_begin();
 	g_in_mb.platoon_setpoint_mps = msg->data;
 	g_in_mb.platoon_setpoint_tick = xTaskGetTickCount();
 	in_mb_write_end();
 }
 
+// Speed setpoint (PV) is the reference sim "tick". The PID runs when a new speed value is read.
 void pv_sub_cb(const void *msgin) {
 	const std_msgs__msg__Float32 *msg = (const std_msgs__msg__Float32*) msgin;
+	// DEBUG -------------------------------
+	g_dbg_speed_cb_count_total++;
+	// DEBUG -------------------------------
 	in_mb_write_begin();
 	g_in_mb.speed_mps = msg->data;
 	g_in_mb.speed_tick = xTaskGetTickCount();
@@ -342,6 +390,9 @@ void pv_sub_cb(const void *msgin) {
 
 void d_sub_cb(const void *msgin) {
 	const std_msgs__msg__Float32 *msg = (const std_msgs__msg__Float32*) msgin;
+	// DEBUG -------------------------------
+	g_dbg_dist_cb_count_total++;
+	// DEBUG -------------------------------
 	in_mb_write_begin();
 	g_in_mb.dist_to_front_m = msg->data;
 	g_in_mb.dist_tick = xTaskGetTickCount();
@@ -621,31 +672,31 @@ void StartUROSTask(void *argument) {
 	CHECK(rclc_node_init_default(&node,"veh_ego_node", "", &support));
 	strcpy(tmpbuff, participant_name);
 
-	CHECK(rclc_publisher_init_default(&throttle_pub, &node,
+	CHECK(rclc_publisher_init_best_effort(&throttle_pub, &node,
 			ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
 			"veh_ego/command/throttle"));
 
 	strcpy(tmpbuff, participant_name);
-	CHECK(rclc_publisher_init_default(&brake_pub, &node,
+	CHECK(rclc_publisher_init_best_effort(&brake_pub, &node,
 			ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
 			"veh_ego/command/brake"));
 
 	strcpy(tmpbuff, participant_name);
-	CHECK(rclc_subscription_init_default(&pv_sub, &node,
+	CHECK(rclc_subscription_init_best_effort(&pv_sub, &node,
 			ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
 			"veh_ego/state/speed"));
 
 	strcpy(tmpbuff, participant_name);
-	CHECK(rclc_subscription_init_default(&r_sub, &node,
+	CHECK(rclc_subscription_init_best_effort(&r_sub, &node,
 			ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
 			"veh_ego/state/setpoint"));
 
-	CHECK(rclc_subscription_init_default(&plat_r_sub, &node,
+	CHECK(rclc_subscription_init_best_effort(&plat_r_sub, &node,
 			ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
 			"platoon/plat_0/setpoint")); // TODO hardcoded platoon ID, must be changable later
 
 	strcpy(tmpbuff, participant_name);
-	CHECK(rclc_subscription_init_default(&d_sub, &node,
+	CHECK(rclc_subscription_init_best_effort(&d_sub, &node,
 			ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
 			"veh_ego/state/dist_to_veh"));
 
@@ -710,6 +761,14 @@ void StartUROSTask(void *argument) {
 
 	for (;;) {
 		vTaskDelayUntil(&lastWake, spinPeriod);
+		// DEBUG -----------------------------
+		TickType_t now_spin = xTaskGetTickCount();
+		static TickType_t prev_spin = 0;
+		g_dbg_uros_tick = now_spin;
+		g_dbg_uros_spin_period_ticks = (prev_spin == 0) ? 0 : (now_spin - prev_spin);
+		prev_spin = now_spin;
+		// -----------------------------------
+
 		rclc_executor_spin_some(&executor, 2);
 
 		now = xTaskGetTickCount();
@@ -721,6 +780,18 @@ void StartUROSTask(void *argument) {
 			(void) out_mb_read_snapshot(&throttle, &brake);
 			throttle_msg.data = throttle;
 			brake_msg.data = brake;
+			
+			// DEBUG --------------------------
+			TickType_t now_pub = now; 
+			g_dbg_uros_last_pub_tick = now_pub;
+			g_dbg_uros_publish_count++;
+
+			TickType_t age = now_pub - g_out_mb.computed_tick;   
+			g_dbg_uros_cmd_age_ticks = age;
+			if (age < g_dbg_uros_cmd_age_min_ticks) g_dbg_uros_cmd_age_min_ticks = age;
+			if (age > g_dbg_uros_cmd_age_max_ticks) g_dbg_uros_cmd_age_max_ticks = age;
+			// -------------------------------
+
 
 			CHECK(rcl_publish(&throttle_pub, &throttle_msg, NULL));
 			CHECK(rcl_publish(&brake_pub, &brake_msg, NULL));
@@ -780,8 +851,8 @@ void StartCrtlTask(void *argument) {
 	platoon_member.is_platooning = in_platoon; 
 
 	platoon_member.k_dist = 5.0f; // Should match Python platoon members
-	platoon_member.min_spacing = 5.0f;
-	platoon_member.time_headway = 0.5f;
+	platoon_member.min_spacing = 7.5f;
+	platoon_member.time_headway = 0.7f;
 
 	platoon_member.get_controller_action = uros_get_controller_action;
 
@@ -806,16 +877,65 @@ void StartCrtlTask(void *argument) {
 		vTaskDelay(ctrlPeriod);
 	}
 
-	for (;;) {
-		vTaskDelayUntil(&lastTick, ctrlPeriod);
+		for (;;) {
+			vTaskDelayUntil(&lastTick, ctrlPeriod);
+			// DEBUG -------------------------------
+			TickType_t now_ctrl = xTaskGetTickCount();
+			static TickType_t prev_ctrl = 0;
+			g_dbg_ctrl_tick = now_ctrl;
+			g_dbg_ctrl_period_ticks = (prev_ctrl == 0) ? 0 : (now_ctrl - prev_ctrl);
+			prev_ctrl = now_ctrl;
+			// --------------------------------------
 
-		PLATOON_inputs_t in = { 0 };
-		TickType_t speed_tick = 0;
-		TickType_t dist_tick = 0;
+			// DEBUG -------------------------------
+			// Compute callback Hz over a 1-second window (1kHz tick => 1000 ticks).
+			// Values are written to g_dbg_*_hz_1s for Live Expressions.
+			static uint32_t prev_speed_cb_total = 0;
+			static uint32_t prev_dist_cb_total = 0;
+			static uint32_t prev_platoon_sp_cb_total = 0;
+
+			if (g_dbg_hz_window_start_tick == 0) {
+				g_dbg_hz_window_start_tick = now_ctrl;
+				prev_speed_cb_total = g_dbg_speed_cb_count_total;
+				prev_dist_cb_total = g_dbg_dist_cb_count_total;
+				prev_platoon_sp_cb_total = g_dbg_platoon_sp_cb_count_total;
+			}
+
+			if ((TickType_t)(now_ctrl - g_dbg_hz_window_start_tick) >= pdMS_TO_TICKS(1000)) {
+				g_dbg_speed_hz_1s = g_dbg_speed_cb_count_total - prev_speed_cb_total;
+				g_dbg_dist_hz_1s = g_dbg_dist_cb_count_total - prev_dist_cb_total;
+				g_dbg_platoon_sp_hz_1s = g_dbg_platoon_sp_cb_count_total - prev_platoon_sp_cb_total;
+
+				prev_speed_cb_total = g_dbg_speed_cb_count_total;
+				prev_dist_cb_total = g_dbg_dist_cb_count_total;
+				prev_platoon_sp_cb_total = g_dbg_platoon_sp_cb_count_total;
+				g_dbg_hz_window_start_tick += pdMS_TO_TICKS(1000);
+			}
+			// --------------------------------------
+
+
+			PLATOON_inputs_t in = { 0 };
+			TickType_t speed_tick = 0;
+			TickType_t dist_tick = 0;
 		TickType_t indiv_sp_tick = 0;
 		TickType_t platoon_sp_tick = 0;
 		(void) in_mb_read_snapshot(&in, &speed_tick, &dist_tick, &indiv_sp_tick,
 				&platoon_sp_tick);
+
+		// DEBUG -------------------------------
+		g_dbg_ctrl_speed_age_ticks = now_ctrl - speed_tick;
+		g_dbg_ctrl_dist_age_ticks = now_ctrl - dist_tick;
+		g_dbg_ctrl_platoon_sp_age_ticks = now_ctrl - platoon_sp_tick;
+
+		if ( g_dbg_ctrl_speed_age_ticks > g_dbg_ctrl_speed_age_ticks_max ) g_dbg_ctrl_speed_age_ticks_max = g_dbg_ctrl_speed_age_ticks;
+		if ( g_dbg_ctrl_speed_age_ticks < g_dbg_ctrl_speed_age_ticks_min ) g_dbg_ctrl_speed_age_ticks_min = g_dbg_ctrl_speed_age_ticks;
+
+		if ( g_dbg_ctrl_dist_age_ticks > g_dbg_ctrl_dist_age_ticks_max ) g_dbg_ctrl_dist_age_ticks_max = g_dbg_ctrl_dist_age_ticks;
+		if ( g_dbg_ctrl_dist_age_ticks < g_dbg_ctrl_dist_age_ticks_min ) g_dbg_ctrl_dist_age_ticks_min = g_dbg_ctrl_dist_age_ticks;
+		
+		if ( g_dbg_ctrl_platoon_sp_age_ticks > g_dbg_ctrl_platoon_sp_age_ticks_max ) g_dbg_ctrl_platoon_sp_age_ticks_max = g_dbg_ctrl_platoon_sp_age_ticks;
+		if ( g_dbg_ctrl_platoon_sp_age_ticks < g_dbg_ctrl_platoon_sp_age_ticks_min ) g_dbg_ctrl_platoon_sp_age_ticks_min = g_dbg_ctrl_platoon_sp_age_ticks;
+		//--------------------------------------
 
 		TickType_t now = xTaskGetTickCount();
 		bool speed_ok = ((TickType_t) (now - speed_tick) <= speedStale);
@@ -870,6 +990,9 @@ void StartCrtlTask(void *argument) {
 
 
 			PLATOON_command_t cmd = compute_control(&platoon_member, &in);
+			// DEBUG ---------------------------
+			g_dbg_ctrl_compute_count++;
+			// ---------------------------------
 			throttle_out = cmd.throttle_cmd;
 			brake_out = cmd.brake_cmd;
 		} else {
