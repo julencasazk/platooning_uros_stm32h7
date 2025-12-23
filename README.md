@@ -43,7 +43,7 @@ Do you want to continue with them? (y/n)
 
 5. Build the project from the project's root dir with:
 ```
-make all j$(nproc)
+make all -j$(nproc)
 ```
 
 4. Flash the project to the STM32H7 board. I've used the STM32CubeIDE GUI programmer to do this.
