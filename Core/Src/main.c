@@ -40,6 +40,9 @@
 #include <pid_stm32.h>
 #include "platooning.h"
 
+#include "FreeRTOS.h"
+#include "task.h"
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -386,6 +389,10 @@ void pv_sub_cb(const void *msgin) {
 	g_in_mb.speed_mps = msg->data;
 	g_in_mb.speed_tick = xTaskGetTickCount();
 	in_mb_write_end();
+	// Wake control task: treat speed as the sim "tick marker" (one control step per new speed sample).
+	if (ctrlTaskHandle != NULL) {
+		xTaskNotifyGive((TaskHandle_t) ctrlTaskHandle);
+	}
 }
 
 void d_sub_cb(const void *msgin) {
@@ -746,11 +753,9 @@ void StartUROSTask(void *argument) {
 	g_out_mb.computed_tick = now;
 	out_mb_write_end();
 
-	// Low-latency executor spin; publish at fixed rate.
-	const TickType_t spinPeriod = pdMS_TO_TICKS(1);
-	const TickType_t pubPeriod = pdMS_TO_TICKS(10);
-	TickType_t lastWake = now;
-	TickType_t lastPub = now;
+		// Low-latency executor spin; publish on-demand (event-driven).
+		const TickType_t spinPeriod = pdMS_TO_TICKS(1);
+		TickType_t lastWake = now;
 
 	uros_task_rdy = 1;
 
@@ -759,8 +764,8 @@ void StartUROSTask(void *argument) {
 		vTaskDelay(spinPeriod);
 	}
 
-	for (;;) {
-		vTaskDelayUntil(&lastWake, spinPeriod);
+		for (;;) {
+			vTaskDelayUntil(&lastWake, spinPeriod);
 		// DEBUG -----------------------------
 		TickType_t now_spin = xTaskGetTickCount();
 		static TickType_t prev_spin = 0;
@@ -769,34 +774,36 @@ void StartUROSTask(void *argument) {
 		prev_spin = now_spin;
 		// -----------------------------------
 
-		rclc_executor_spin_some(&executor, 2);
+			rclc_executor_spin_some(&executor, 2);
 
-		now = xTaskGetTickCount();
-		if ((TickType_t) (now - lastPub) >= pubPeriod) {
-			lastPub += pubPeriod;
+			// Publish immediately when ctrlTask has computed a new command.
+			uint32_t n = ulTaskNotifyTake(pdTRUE, 0);
+			if (n > 0) {
+				// coalesce bursts; publish only once with the latest values
+				while (ulTaskNotifyTake(pdTRUE, 0) > 0) {}
 
-			float throttle = 0.0f;
-			float brake = 0.0f;
-			(void) out_mb_read_snapshot(&throttle, &brake);
-			throttle_msg.data = throttle;
-			brake_msg.data = brake;
-			
-			// DEBUG --------------------------
-			TickType_t now_pub = now; 
-			g_dbg_uros_last_pub_tick = now_pub;
-			g_dbg_uros_publish_count++;
+				float throttle = 0.0f;
+				float brake = 0.0f;
+				(void) out_mb_read_snapshot(&throttle, &brake);
+				throttle_msg.data = throttle;
+				brake_msg.data = brake;
 
-			TickType_t age = now_pub - g_out_mb.computed_tick;   
-			g_dbg_uros_cmd_age_ticks = age;
-			if (age < g_dbg_uros_cmd_age_min_ticks) g_dbg_uros_cmd_age_min_ticks = age;
-			if (age > g_dbg_uros_cmd_age_max_ticks) g_dbg_uros_cmd_age_max_ticks = age;
-			// -------------------------------
+				now = xTaskGetTickCount();
+				// DEBUG --------------------------
+				TickType_t now_pub = now;
+				g_dbg_uros_last_pub_tick = now_pub;
+				g_dbg_uros_publish_count++;
 
+				TickType_t age = now_pub - g_out_mb.computed_tick;
+				g_dbg_uros_cmd_age_ticks = age;
+				if (age < g_dbg_uros_cmd_age_min_ticks) g_dbg_uros_cmd_age_min_ticks = age;
+				if (age > g_dbg_uros_cmd_age_max_ticks) g_dbg_uros_cmd_age_max_ticks = age;
+				// -------------------------------
 
-			CHECK(rcl_publish(&throttle_pub, &throttle_msg, NULL));
-			CHECK(rcl_publish(&brake_pub, &brake_msg, NULL));
+				CHECK(rcl_publish(&throttle_pub, &throttle_msg, NULL));
+				CHECK(rcl_publish(&brake_pub, &brake_msg, NULL));
+			}
 		}
-	}
 	/* USER CODE END 5 */
 }
 
@@ -856,9 +863,9 @@ void StartCrtlTask(void *argument) {
 
 	platoon_member.get_controller_action = uros_get_controller_action;
 
-	// ====================================================================
-	const TickType_t ctrlPeriod = pdMS_TO_TICKS(10);
-	TickType_t lastTick = xTaskGetTickCount();
+		// ====================================================================
+		const TickType_t ctrlPeriod = pdMS_TO_TICKS(10);
+		TickType_t lastCompute = xTaskGetTickCount();
 
 	const TickType_t speedStale = pdMS_TO_TICKS(50);
 	const TickType_t distStale = pdMS_TO_TICKS(100);
@@ -877,15 +884,26 @@ void StartCrtlTask(void *argument) {
 		vTaskDelay(ctrlPeriod);
 	}
 
-		for (;;) {
-			vTaskDelayUntil(&lastTick, ctrlPeriod);
-			// DEBUG -------------------------------
-			TickType_t now_ctrl = xTaskGetTickCount();
-			static TickType_t prev_ctrl = 0;
-			g_dbg_ctrl_tick = now_ctrl;
-			g_dbg_ctrl_period_ticks = (prev_ctrl == 0) ? 0 : (now_ctrl - prev_ctrl);
-			prev_ctrl = now_ctrl;
-			// --------------------------------------
+			for (;;) {
+				// Lockstep: wait for a new speed sample (sim tick marker).
+				(void) ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+				// Coalesce bursts: if multiple samples arrived, run once with the latest mailbox values.
+				while (ulTaskNotifyTake(pdTRUE, 0) > 0) {}
+
+				// 100 Hz ceiling (wall-clock): if samples arrive faster than 10ms, delay.
+				TickType_t now_ctrl = xTaskGetTickCount();
+				TickType_t elapsed = now_ctrl - lastCompute;
+				if (elapsed < ctrlPeriod) {
+					vTaskDelay(ctrlPeriod - elapsed);
+					now_ctrl = xTaskGetTickCount();
+				}
+
+				// DEBUG -------------------------------
+				static TickType_t prev_ctrl = 0;
+				g_dbg_ctrl_tick = now_ctrl;
+				g_dbg_ctrl_period_ticks = (prev_ctrl == 0) ? 0 : (now_ctrl - prev_ctrl);
+				prev_ctrl = now_ctrl;
+				// --------------------------------------
 
 			// DEBUG -------------------------------
 			// Compute callback Hz over a 1-second window (1kHz tick => 1000 ticks).
@@ -937,9 +955,9 @@ void StartCrtlTask(void *argument) {
 		if ( g_dbg_ctrl_platoon_sp_age_ticks < g_dbg_ctrl_platoon_sp_age_ticks_min ) g_dbg_ctrl_platoon_sp_age_ticks_min = g_dbg_ctrl_platoon_sp_age_ticks;
 		//--------------------------------------
 
-		TickType_t now = xTaskGetTickCount();
-		bool speed_ok = ((TickType_t) (now - speed_tick) <= speedStale);
-		bool dist_ok = ((TickType_t) (now - dist_tick) <= distStale);
+			TickType_t now = now_ctrl;
+			bool speed_ok = ((TickType_t) (now - speed_tick) <= speedStale);
+			bool dist_ok = ((TickType_t) (now - dist_tick) <= distStale);
 
 		if (!dist_ok) {
 			in.distance_to_front_m = 0.0f;
@@ -1002,12 +1020,19 @@ void StartCrtlTask(void *argument) {
 			brake_out = ramp_towards_zero(brake_out, rampStep);
 		}
 
-		out_mb_write_begin();
-		g_out_mb.throttle = throttle_out;
-		g_out_mb.brake = brake_out;
-		g_out_mb.computed_tick = now;
-		out_mb_write_end();
-	}
+			out_mb_write_begin();
+			g_out_mb.throttle = throttle_out;
+			g_out_mb.brake = brake_out;
+			g_out_mb.computed_tick = now;
+			out_mb_write_end();
+
+			// Notify uROS task to publish new command immediately.
+			if (uROSTaskHandle != NULL) {
+				xTaskNotifyGive((TaskHandle_t) uROSTaskHandle);
+			}
+
+			lastCompute = now_ctrl;
+		}
 	/* USER CODE END StartCrtlTask */
 }
 
