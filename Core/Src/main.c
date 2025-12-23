@@ -935,15 +935,43 @@ void StartCrtlTask(void *argument) {
 			PLATOON_inputs_t in = { 0 };
 			TickType_t speed_tick = 0;
 			TickType_t dist_tick = 0;
-		TickType_t indiv_sp_tick = 0;
-		TickType_t platoon_sp_tick = 0;
-		(void) in_mb_read_snapshot(&in, &speed_tick, &dist_tick, &indiv_sp_tick,
-				&platoon_sp_tick);
+			TickType_t indiv_sp_tick = 0;
+			TickType_t platoon_sp_tick = 0;
+			(void) in_mb_read_snapshot(&in, &speed_tick, &dist_tick, &indiv_sp_tick,
+					&platoon_sp_tick);
 
-		// DEBUG -------------------------------
-		g_dbg_ctrl_speed_age_ticks = now_ctrl - speed_tick;
-		g_dbg_ctrl_dist_age_ticks = now_ctrl - dist_tick;
-		g_dbg_ctrl_platoon_sp_age_ticks = now_ctrl - platoon_sp_tick;
+			// Wait briefly for distance (and platoon setpoint) to catch up to this tick.
+			// On USB-CDC/micro-ROS, topics can be delivered/processed skewed; stepping on fresh speed
+			// but stale distance causes late braking. This bounded wait reduces that skew without
+			// requiring stamped/sequence messages.
+			const TickType_t dist_gate_max_wait = pdMS_TO_TICKS(10);
+			const TickType_t dist_gate_step = pdMS_TO_TICKS(1);
+			const TickType_t dist_gate_target_age = pdMS_TO_TICKS(2);
+			const TickType_t sp_gate_target_age = pdMS_TO_TICKS(5);
+			TickType_t dist_tick_0 = dist_tick;
+			TickType_t platoon_sp_tick_0 = platoon_sp_tick;
+
+			for (TickType_t waited = 0; waited < dist_gate_max_wait; waited += dist_gate_step) {
+				TickType_t dist_age = now_ctrl - dist_tick;
+				TickType_t sp_age = now_ctrl - platoon_sp_tick;
+
+				// Prefer: get a newer distance sample; also try to keep platoon SP reasonably fresh.
+				if ((dist_age <= dist_gate_target_age && sp_age <= sp_gate_target_age)
+						|| (dist_tick != dist_tick_0 && platoon_sp_tick != platoon_sp_tick_0)
+						|| (dist_tick != dist_tick_0 && dist_age <= pdMS_TO_TICKS(5))) {
+					break;
+				}
+
+				vTaskDelay(dist_gate_step);
+				now_ctrl = xTaskGetTickCount();
+				(void) in_mb_read_snapshot(&in, &speed_tick, &dist_tick, &indiv_sp_tick,
+						&platoon_sp_tick);
+			}
+
+			// DEBUG -------------------------------
+			g_dbg_ctrl_speed_age_ticks = now_ctrl - speed_tick;
+			g_dbg_ctrl_dist_age_ticks = now_ctrl - dist_tick;
+			g_dbg_ctrl_platoon_sp_age_ticks = now_ctrl - platoon_sp_tick;
 
 		if ( g_dbg_ctrl_speed_age_ticks > g_dbg_ctrl_speed_age_ticks_max ) g_dbg_ctrl_speed_age_ticks_max = g_dbg_ctrl_speed_age_ticks;
 		if ( g_dbg_ctrl_speed_age_ticks < g_dbg_ctrl_speed_age_ticks_min ) g_dbg_ctrl_speed_age_ticks_min = g_dbg_ctrl_speed_age_ticks;
@@ -959,9 +987,11 @@ void StartCrtlTask(void *argument) {
 			bool speed_ok = ((TickType_t) (now - speed_tick) <= speedStale);
 			bool dist_ok = ((TickType_t) (now - dist_tick) <= distStale);
 
-		if (!dist_ok) {
-			in.distance_to_front_m = 0.0f;
-		}
+			if (!dist_ok) {
+				// Conservative fallback: if distance is stale, assume a very small gap to bias braking
+				// instead of disabling spacing logic entirely.
+				in.distance_to_front_m = 0.1f;
+			}
 
 		if (speed_ok) {
 
