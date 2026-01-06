@@ -104,8 +104,10 @@ const osThreadAttr_t ctrlTask_attributes = { .name = "ctrlTask", .stack_size =
 volatile TickType_t g_dbg_ctrl_tick = 0;
 volatile TickType_t g_dbg_uros_tick = 0;
 
-volatile TickType_t g_dbg_ctrl_period_ticks = 0;
-volatile TickType_t g_dbg_uros_spin_period_ticks = 0;
+	volatile TickType_t g_dbg_ctrl_period_ticks = 0;
+	volatile TickType_t g_dbg_uros_spin_period_ticks = 0;
+	// DEBUG ----- max gap between executor spins (ticks; 1 tick ~= 1ms at 1kHz)
+	volatile TickType_t g_dbg_uros_spin_gap_max_ticks = 0;
 
 volatile TickType_t g_dbg_uros_last_pub_tick = 0;
 volatile TickType_t g_dbg_ctrl_phase_since_pub_ticks = 0;
@@ -771,6 +773,10 @@ void StartUROSTask(void *argument) {
 		static TickType_t prev_spin = 0;
 		g_dbg_uros_tick = now_spin;
 		g_dbg_uros_spin_period_ticks = (prev_spin == 0) ? 0 : (now_spin - prev_spin);
+		if (prev_spin != 0) {
+			TickType_t gap = now_spin - prev_spin;
+			if (gap > g_dbg_uros_spin_gap_max_ticks) g_dbg_uros_spin_gap_max_ticks = gap;
+		}
 		prev_spin = now_spin;
 		// -----------------------------------
 
@@ -779,7 +785,7 @@ void StartUROSTask(void *argument) {
 			// Publish immediately when ctrlTask has computed a new command.
 			uint32_t n = ulTaskNotifyTake(pdTRUE, 0);
 			if (n > 0) {
-				// coalesce bursts; publish only once with the latest values
+				// publish only once with the latest values
 				while (ulTaskNotifyTake(pdTRUE, 0) > 0) {}
 
 				float throttle = 0.0f;
