@@ -19,7 +19,6 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "cmsis_os.h"
-#include "usb_device.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -57,7 +56,6 @@ typedef struct
 
 } PID_Gains_TypeDef;
 
-
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -80,7 +78,6 @@ char g_last_err[128] = {0};
       strncpy(g_last_err, err.str, sizeof(g_last_err) - 1);           \
       g_last_err[sizeof(g_last_err) - 1] = '\0';                      \
       HAL_GPIO_WritePin(GPIOE, GPIO_PIN_1, GPIO_PIN_SET);             \
-	  printf("Error: %s\n", g_last_err);    						  \
       __BKPT(0);                                                      \
       while (1) { __NOP(); }                                          \
     }                                                                 \
@@ -89,14 +86,22 @@ char g_last_err[128] = {0};
 
 /* Private variables ---------------------------------------------------------*/
 
+UART_HandleTypeDef huart2;
+
 /* Definitions for uROSTask */
 osThreadId_t uROSTaskHandle;
-const osThreadAttr_t uROSTask_attributes = { .name = "uROSTask", .stack_size =
-		3000 * 4, .priority = (osPriority_t) osPriorityNormal, };
+const osThreadAttr_t uROSTask_attributes = {
+  .name = "uROSTask",
+  .stack_size = 3000 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
 /* Definitions for ctrlTask */
 osThreadId_t ctrlTaskHandle;
-const osThreadAttr_t ctrlTask_attributes = { .name = "ctrlTask", .stack_size =
-		256 * 4, .priority = (osPriority_t) osPriorityAboveNormal, };
+const osThreadAttr_t ctrlTask_attributes = {
+  .name = "ctrlTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityBelowNormal7,
+};
 /* USER CODE BEGIN PV */
 
 // DEBUGGING vars
@@ -143,8 +148,8 @@ volatile TickType_t g_dbg_hz_window_start_tick = 0;
 // DEBUG -------------------------------
 
 // Platoon participation config
-const char *participant_name = "veh_ego";
-PLATOON_member_type_TypeDef participant_role = _PLATOON_FOLLOWER; 
+const char *participant_name = "veh_3";
+uint8_t member_index = 3;
 PLATOON_platoon_enabled_TypeDef in_platoon = _PLATOON_ENABLED; 
 
 rcl_publisher_t throttle_pub;
@@ -223,6 +228,7 @@ volatile rcl_ret_t glob_ret = RCL_RET_OK;
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_USART2_UART_Init(void);
 void StartUROSTask(void *argument);
 void StartCrtlTask(void *argument);
 
@@ -422,196 +428,247 @@ float uros_get_controller_action(float speed, float setpoint) {
 /* USER CODE END 0 */
 
 /**
- * @brief  The application entry point.
- * @retval int
- */
-int main(void) {
+  * @brief  The application entry point.
+  * @retval int
+  */
+int main(void)
+{
 
-	/* USER CODE BEGIN 1 */
+  /* USER CODE BEGIN 1 */
 
-	/* USER CODE END 1 */
 
-	/* MCU Configuration--------------------------------------------------------*/
+  /* USER CODE END 1 */
 
-	/* Reset of all peripherals, Initializes the Flash interface and the Systick. */
-	HAL_Init();
+  /* MCU Configuration--------------------------------------------------------*/
 
-	/* USER CODE BEGIN Init */
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
+  HAL_Init();
 
-	/* USER CODE END Init */
+  /* USER CODE BEGIN Init */
 
-	/* Configure the system clock */
-	SystemClock_Config();
+  /* USER CODE END Init */
 
-	/* USER CODE BEGIN SysInit */
+  /* Configure the system clock */
+  SystemClock_Config();
 
-	/* USER CODE END SysInit */
+  /* USER CODE BEGIN SysInit */
 
-	/* Initialize all configured peripherals */
-	MX_GPIO_Init();
-	/* USER CODE BEGIN 2 */
+  /* USER CODE END SysInit */
 
-	/* USER CODE END 2 */
+  /* Initialize all configured peripherals */
+  MX_GPIO_Init();
+  MX_USART2_UART_Init();
+  /* USER CODE BEGIN 2 */
 
-	/* Init scheduler */
-	osKernelInitialize();
+  /* USER CODE END 2 */
 
-	/* USER CODE BEGIN RTOS_MUTEX */
+  /* Init scheduler */
+  osKernelInitialize();
+
+  /* USER CODE BEGIN RTOS_MUTEX */
 	/* add mutexes, ... */
-	/* USER CODE END RTOS_MUTEX */
+  /* USER CODE END RTOS_MUTEX */
 
-	/* USER CODE BEGIN RTOS_SEMAPHORES */
+  /* USER CODE BEGIN RTOS_SEMAPHORES */
 	/* add semaphores, ... */
-	/* USER CODE END RTOS_SEMAPHORES */
+  /* USER CODE END RTOS_SEMAPHORES */
 
-	/* USER CODE BEGIN RTOS_TIMERS */
+  /* USER CODE BEGIN RTOS_TIMERS */
 	/* start timers, add new ones, ... */
-	/* USER CODE END RTOS_TIMERS */
+  /* USER CODE END RTOS_TIMERS */
 
-	/* USER CODE BEGIN RTOS_QUEUES */
+  /* USER CODE BEGIN RTOS_QUEUES */
 	/* add queues, ... */
-	/* USER CODE END RTOS_QUEUES */
+  /* USER CODE END RTOS_QUEUES */
 
-	/* Create the thread(s) */
-	/* creation of uROSTask */
-	uROSTaskHandle = osThreadNew(StartUROSTask, NULL, &uROSTask_attributes);
+  /* Create the thread(s) */
+  /* creation of uROSTask */
+  uROSTaskHandle = osThreadNew(StartUROSTask, NULL, &uROSTask_attributes);
 
-	/* creation of ctrlTask */
-	ctrlTaskHandle = osThreadNew(StartCrtlTask, NULL, &ctrlTask_attributes);
+  /* creation of ctrlTask */
+  ctrlTaskHandle = osThreadNew(StartCrtlTask, NULL, &ctrlTask_attributes);
 
-	/* USER CODE BEGIN RTOS_THREADS */
+  /* USER CODE BEGIN RTOS_THREADS */
 	/* add threads, ... */
-	/* USER CODE END RTOS_THREADS */
+  /* USER CODE END RTOS_THREADS */
 
-	/* USER CODE BEGIN RTOS_EVENTS */
+  /* USER CODE BEGIN RTOS_EVENTS */
 	/* add events, ... */
-	/* USER CODE END RTOS_EVENTS */
+  /* USER CODE END RTOS_EVENTS */
 
-	/* Start scheduler */
-	osKernelStart();
+  /* Start scheduler */
+  osKernelStart();
 
-	/* We should never get here as control is now taken by the scheduler */
+  /* We should never get here as control is now taken by the scheduler */
 
-	/* Infinite loop */
-	/* USER CODE BEGIN WHILE */
+  /* Infinite loop */
+  /* USER CODE BEGIN WHILE */
 	while (1) {
-		/* USER CODE END WHILE */
+    /* USER CODE END WHILE */
 
-		/* USER CODE BEGIN 3 */
+    /* USER CODE BEGIN 3 */
 	}
-	/* USER CODE END 3 */
+  /* USER CODE END 3 */
 }
 
 /**
- * @brief System Clock Configuration
- * @retval None
- */
-void SystemClock_Config(void) {
-	RCC_OscInitTypeDef RCC_OscInitStruct = { 0 };
-	RCC_ClkInitTypeDef RCC_ClkInitStruct = { 0 };
+  * @brief System Clock Configuration
+  * @retval None
+  */
+void SystemClock_Config(void)
+{
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-	/** Supply configuration update enable
-	 */
-	HAL_PWREx_ConfigSupply(PWR_LDO_SUPPLY);
+  /** Supply configuration update enable
+  */
+  HAL_PWREx_ConfigSupply(PWR_LDO_SUPPLY);
 
-	/** Configure the main internal regulator output voltage
-	 */
-	__HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE2);
+  /** Configure the main internal regulator output voltage
+  */
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE2);
 
-	while (!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {
-	}
+  while(!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
 
-	/** Initializes the RCC Oscillators according to the specified parameters
-	 * in the RCC_OscInitTypeDef structure.
-	 */
-	RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI48
-			| RCC_OSCILLATORTYPE_HSI;
-	RCC_OscInitStruct.HSIState = RCC_HSI_DIV1;
-	RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-	RCC_OscInitStruct.HSI48State = RCC_HSI48_ON;
-	RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
-	if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) {
-		Error_Handler();
-	}
+  /** Initializes the RCC Oscillators according to the specified parameters
+  * in the RCC_OscInitTypeDef structure.
+  */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.HSIState = RCC_HSI_DIV1;
+  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
 
-	/** Initializes the CPU, AHB and APB buses clocks
-	 */
-	RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK
-			| RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2 | RCC_CLOCKTYPE_D3PCLK1
-			| RCC_CLOCKTYPE_D1PCLK1;
-	RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
-	RCC_ClkInitStruct.SYSCLKDivider = RCC_SYSCLK_DIV1;
-	RCC_ClkInitStruct.AHBCLKDivider = RCC_HCLK_DIV1;
-	RCC_ClkInitStruct.APB3CLKDivider = RCC_APB3_DIV1;
-	RCC_ClkInitStruct.APB1CLKDivider = RCC_APB1_DIV1;
-	RCC_ClkInitStruct.APB2CLKDivider = RCC_APB2_DIV1;
-	RCC_ClkInitStruct.APB4CLKDivider = RCC_APB4_DIV1;
+  /** Initializes the CPU, AHB and APB buses clocks
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2
+                              |RCC_CLOCKTYPE_D3PCLK1|RCC_CLOCKTYPE_D1PCLK1;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
+  RCC_ClkInitStruct.SYSCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB3CLKDivider = RCC_APB3_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_APB1_DIV1;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_APB2_DIV1;
+  RCC_ClkInitStruct.APB4CLKDivider = RCC_APB4_DIV1;
 
-	if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_1) != HAL_OK) {
-		Error_Handler();
-	}
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
 }
 
 /**
- * @brief GPIO Initialization Function
- * @param None
- * @retval None
- */
-static void MX_GPIO_Init(void) {
-	GPIO_InitTypeDef GPIO_InitStruct = { 0 };
-	/* USER CODE BEGIN MX_GPIO_Init_1 */
+  * @brief USART2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART2_UART_Init(void)
+{
 
-	/* USER CODE END MX_GPIO_Init_1 */
+  /* USER CODE BEGIN USART2_Init 0 */
 
-	/* GPIO Ports Clock Enable */
-	__HAL_RCC_GPIOC_CLK_ENABLE();
-	__HAL_RCC_GPIOH_CLK_ENABLE();
-	__HAL_RCC_GPIOB_CLK_ENABLE();
-	__HAL_RCC_GPIOD_CLK_ENABLE();
-	__HAL_RCC_GPIOA_CLK_ENABLE();
-	__HAL_RCC_GPIOE_CLK_ENABLE();
+  /* USER CODE END USART2_Init 0 */
 
-	/*Configure GPIO pin Output Level */
-	HAL_GPIO_WritePin(GPIOB, LD1_Pin | LD3_Pin | LD2_Pin, GPIO_PIN_RESET);
+  /* USER CODE BEGIN USART2_Init 1 */
 
-	/*Configure GPIO pin Output Level */
-	HAL_GPIO_WritePin(GPIOE, GPIO_PIN_1, GPIO_PIN_RESET);
+  /* USER CODE END USART2_Init 1 */
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 460800;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_NONE;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart2.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart2.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+  huart2.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  if (HAL_UART_Init(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetTxFifoThreshold(&huart2, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetRxFifoThreshold(&huart2, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_DisableFifoMode(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART2_Init 2 */
 
-	/*Configure GPIO pin : PC13 */
-	GPIO_InitStruct.Pin = GPIO_PIN_13;
-	GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
-	GPIO_InitStruct.Pull = GPIO_NOPULL;
-	HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+  /* USER CODE END USART2_Init 2 */
 
-	/*Configure GPIO pins : LD1_Pin LD3_Pin LD2_Pin */
-	GPIO_InitStruct.Pin = LD1_Pin | LD3_Pin | LD2_Pin;
-	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-	GPIO_InitStruct.Pull = GPIO_NOPULL;
-	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-	HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+}
 
-	/*Configure GPIO pins : STLINK_RX_Pin STLINK_TX_Pin */
-	GPIO_InitStruct.Pin = STLINK_RX_Pin | STLINK_TX_Pin;
-	GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-	GPIO_InitStruct.Pull = GPIO_NOPULL;
-	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-	GPIO_InitStruct.Alternate = GPIO_AF7_USART3;
-	HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+/**
+  * @brief GPIO Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_GPIO_Init(void)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  /* USER CODE BEGIN MX_GPIO_Init_1 */
 
-	/*Configure GPIO pin : PE1 */
-	GPIO_InitStruct.Pin = GPIO_PIN_1;
-	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-	GPIO_InitStruct.Pull = GPIO_NOPULL;
-	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-	HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
+  /* USER CODE END MX_GPIO_Init_1 */
 
-	/* EXTI interrupt init*/
-	HAL_NVIC_SetPriority(EXTI15_10_IRQn, 5, 0);
-	HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
+  /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOC_CLK_ENABLE();
+  __HAL_RCC_GPIOH_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOD_CLK_ENABLE();
+  __HAL_RCC_GPIOE_CLK_ENABLE();
 
-	/* USER CODE BEGIN MX_GPIO_Init_2 */
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, LD1_Pin|LD3_Pin|LD2_Pin, GPIO_PIN_RESET);
 
-	/* USER CODE END MX_GPIO_Init_2 */
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOE, GPIO_PIN_1, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : PC13 */
+  GPIO_InitStruct.Pin = GPIO_PIN_13;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : LD1_Pin LD3_Pin LD2_Pin */
+  GPIO_InitStruct.Pin = LD1_Pin|LD3_Pin|LD2_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : STLINK_RX_Pin STLINK_TX_Pin */
+  GPIO_InitStruct.Pin = STLINK_RX_Pin|STLINK_TX_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  GPIO_InitStruct.Alternate = GPIO_AF7_USART3;
+  HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PE1 */
+  GPIO_InitStruct.Pin = GPIO_PIN_1;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
+
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
+
+  /* USER CODE BEGIN MX_GPIO_Init_2 */
+
+  /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
@@ -620,6 +677,8 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
 		BspButtonState = 1;
 	}
 }
+
+
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartUROSTask */
@@ -629,10 +688,10 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
  * @retval None
  */
 /* USER CODE END Header_StartUROSTask */
-void StartUROSTask(void *argument) {
-	/* init code for USB_DEVICE */
-	MX_USB_DEVICE_Init();
-	/* USER CODE BEGIN 5 */
+void StartUROSTask(void *argument)
+{
+  /* USER CODE BEGIN 5 */
+
 	// micro-ROS configuration
 	/*
 	 * Turn off LEDs. Not needed but whatever
@@ -641,7 +700,7 @@ void StartUROSTask(void *argument) {
 	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);
 
 	rmw_uros_set_custom_transport(
-	true, (void*) NULL, cubemx_transport_open, cubemx_transport_close,
+	true, (void*) &huart2, cubemx_transport_open, cubemx_transport_close,
 			cubemx_transport_write, cubemx_transport_read);
 
 	// Wait for micro-ROS Agent to start and be available
@@ -661,7 +720,6 @@ void StartUROSTask(void *argument) {
 	freeRTOS_allocator.zero_allocate = microros_zero_allocate;
 
 	if (!rcutils_set_default_allocator(&freeRTOS_allocator)) {
-		printf("Error on default allocators (line %d)\n", __LINE__);
 		__BKPT(0);
 		while (1) {__NOP();}
 	}
@@ -678,27 +736,27 @@ void StartUROSTask(void *argument) {
 	char tmpbuff[150];
 	strcpy(tmpbuff, participant_name);
 
-	CHECK(rclc_node_init_default(&node,"veh_ego_node", "", &support));
+	CHECK(rclc_node_init_default(&node,"veh_3_node", "", &support));
 	strcpy(tmpbuff, participant_name);
 
 	CHECK(rclc_publisher_init_best_effort(&throttle_pub, &node,
 			ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
-			"veh_ego/command/throttle"));
+			"veh_3/command/throttle"));
 
 	strcpy(tmpbuff, participant_name);
 	CHECK(rclc_publisher_init_best_effort(&brake_pub, &node,
 			ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
-			"veh_ego/command/brake"));
+			"veh_3/command/brake"));
 
 	strcpy(tmpbuff, participant_name);
 	CHECK(rclc_subscription_init_best_effort(&pv_sub, &node,
 			ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
-			"veh_ego/state/speed"));
+			"veh_3/state/speed"));
 
 	strcpy(tmpbuff, participant_name);
 	CHECK(rclc_subscription_init_best_effort(&r_sub, &node,
 			ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
-			"veh_ego/state/setpoint"));
+			"veh_3/state/setpoint"));
 
 	CHECK(rclc_subscription_init_best_effort(&plat_r_sub, &node,
 			ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
@@ -707,7 +765,7 @@ void StartUROSTask(void *argument) {
 	strcpy(tmpbuff, participant_name);
 	CHECK(rclc_subscription_init_best_effort(&d_sub, &node,
 			ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
-			"veh_ego/state/dist_to_veh"));
+			"veh_3/state/dist_to_veh"));
 
 	executor = rclc_executor_get_zero_initialized_executor();
 	CHECK(rclc_executor_init(&executor, &support.context, 7, &allocator));
@@ -810,7 +868,7 @@ void StartUROSTask(void *argument) {
 				CHECK(rcl_publish(&brake_pub, &brake_msg, NULL));
 			}
 		}
-	/* USER CODE END 5 */
+  /* USER CODE END 5 */
 }
 
 /* USER CODE BEGIN Header_StartCrtlTask */
@@ -820,8 +878,9 @@ void StartUROSTask(void *argument) {
  * @retval None
  */
 /* USER CODE END Header_StartCrtlTask */
-void StartCrtlTask(void *argument) {
-	/* USER CODE BEGIN StartCrtlTask */
+void StartCrtlTask(void *argument)
+{
+  /* USER CODE BEGIN StartCrtlTask */
 	// Setup Speed PID controller
 	// ===================================================================
 	pid_init(&speed_pid,
@@ -860,12 +919,12 @@ void StartCrtlTask(void *argument) {
 	// Setup Platoon member handler
 	// ====================================================================
 	platoon_member.name = participant_name;
-	platoon_member.role = participant_role;
+	platoon_member.platoon_member_index = member_index;
 	platoon_member.is_platooning = in_platoon; 
 
 	platoon_member.k_dist = 5.0f; // Should match Python platoon members
 	platoon_member.min_spacing = 7.5f;
-	platoon_member.time_headway = 0.7f;
+	platoon_member.time_headway = 0.3f;
 
 	platoon_member.get_controller_action = uros_get_controller_action;
 
@@ -1069,40 +1128,43 @@ void StartCrtlTask(void *argument) {
 
 			lastCompute = now_ctrl;
 		}
-	/* USER CODE END StartCrtlTask */
+  /* USER CODE END StartCrtlTask */
 }
 
 /**
- * @brief  Period elapsed callback in non blocking mode
- * @note   This function is called  when TIM1 interrupt took place, inside
- * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
- * a global variable "uwTick" used as application time base.
- * @param  htim : TIM handle
- * @retval None
- */
-void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
-	/* USER CODE BEGIN Callback 0 */
+  * @brief  Period elapsed callback in non blocking mode
+  * @note   This function is called  when TIM1 interrupt took place, inside
+  * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
+  * a global variable "uwTick" used as application time base.
+  * @param  htim : TIM handle
+  * @retval None
+  */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  /* USER CODE BEGIN Callback 0 */
 
-	/* USER CODE END Callback 0 */
-	if (htim->Instance == TIM1) {
-		HAL_IncTick();
-	}
-	/* USER CODE BEGIN Callback 1 */
+  /* USER CODE END Callback 0 */
+  if (htim->Instance == TIM1)
+  {
+    HAL_IncTick();
+  }
+  /* USER CODE BEGIN Callback 1 */
 
-	/* USER CODE END Callback 1 */
+  /* USER CODE END Callback 1 */
 }
 
 /**
- * @brief  This function is executed in case of error occurrence.
- * @retval None
- */
-void Error_Handler(void) {
-	/* USER CODE BEGIN Error_Handler_Debug */
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
+  */
+void Error_Handler(void)
+{
+  /* USER CODE BEGIN Error_Handler_Debug */
 	/* User can add his own implementation to report the HAL error return state */
 	__disable_irq();
 	while (1) {
 	}
-	/* USER CODE END Error_Handler_Debug */
+  /* USER CODE END Error_Handler_Debug */
 }
 #ifdef USE_FULL_ASSERT
 /**

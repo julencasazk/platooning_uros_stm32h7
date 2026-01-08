@@ -1,3 +1,5 @@
+#include <stdint.h>
+
 
 #ifndef __PLATOONING_H__
 #define __PLATOONING_H__
@@ -7,11 +9,6 @@
 extern "C" {
 #endif
 
-
-typedef enum {
-	_PLATOON_LEAD = 0,
-	_PLATOON_FOLLOWER = 1
-} PLATOON_member_type_TypeDef;
 
 typedef enum {
 	_PLATOON_DISABLED = 0, // Vehicle acts as in Adaptive Cruise Control mode, no following
@@ -31,8 +28,8 @@ typedef struct {
 } PLATOON_command_t;
 
 typedef struct {
-	 
-	PLATOON_member_type_TypeDef role;
+
+	uint8_t platoon_member_index;
 	PLATOON_platoon_enabled_TypeDef is_platooning;
 	const char* name;
 

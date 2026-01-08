@@ -1,10 +1,6 @@
 #include "platooning.h"
 #include <math.h>
 
-
-
-
-
 PLATOON_command_t compute_control(const PLATOON_member_t* member,
 		const PLATOON_inputs_t* in)
 {
@@ -41,7 +37,7 @@ PLATOON_command_t compute_control(const PLATOON_member_t* member,
 		} else {
 			// If too far, only speed up beyond base setpoint when platooning as a follower.
 			if (member->is_platooning == _PLATOON_ENABLED
-					&& member->role == _PLATOON_FOLLOWER) {
+					&& member->platoon_member_index != 0) {
 				d_sp = member->k_dist * dist_err;
 				// TODO For safety, this speed should not exceed road's legal limit.
 				// the LEADER should deccelerate,to not let the followers speed over
@@ -59,7 +55,7 @@ PLATOON_command_t compute_control(const PLATOON_member_t* member,
 		command.throttle_cmd = u;
 	} else {
 		// If negative, brake
-		command.brake_cmd = fabsf(u);
+		command.brake_cmd = 0.3 * fabsf(u);
 		// TODO Brake should not be pushable to max, only in emergency braking.
 	}
 
