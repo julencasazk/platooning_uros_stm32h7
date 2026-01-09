@@ -20,6 +20,7 @@ typedef struct {
 	float distance_to_front_m; // <= 0.0f means invalid/unavailable
 	float indiv_setpoint_mps;
 	float platoon_setpoint_mps;
+	float preceding_speed_mps;
 } PLATOON_inputs_t;
 
 typedef struct {
@@ -35,7 +36,8 @@ typedef struct {
 
 	float time_headway;
 	float min_spacing;
-	float k_dist;
+	float k_dist; // Distance gain effect on setpoint variation
+	float k_vel; // Relative speed difference effect on setpoint variation
 
 
 	float (*get_controller_action)(float speed, float setpoint);

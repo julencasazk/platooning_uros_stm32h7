@@ -152,13 +152,16 @@ const char *participant_name = "veh_3";
 uint8_t member_index = 3;
 PLATOON_platoon_enabled_TypeDef in_platoon = _PLATOON_ENABLED; 
 
+// Publishers
 rcl_publisher_t throttle_pub;
 rcl_publisher_t brake_pub;
 
+// Subscribers
 rcl_subscription_t r_sub; // Speed setpoint
 rcl_subscription_t pv_sub; // Current speed reading
 rcl_subscription_t d_sub; // Distance to the car ahead
 rcl_subscription_t plat_r_sub; // Platoon speed setpoint
+rcl_subscription_t prec_v_sub; // Speed of the preceding vehicle
 // rcl_subscription_t in_platoon_msg; // For later >:P
 
 // Message typedef to store readings in subscription callbacks
@@ -166,6 +169,8 @@ std_msgs__msg__Float32 r_msg;
 std_msgs__msg__Float32 plat_r_msg;
 std_msgs__msg__Float32 pv_msg;
 std_msgs__msg__Float32 d_msg;
+std_msgs__msg__Float32 prec_v_msg;
+
 // volatile sts_msgs__msg__Bool in_platoon_msg; // For later >:P
 
 // Message typedef to store data before publishing
@@ -262,10 +267,13 @@ typedef struct {
 	volatile float dist_to_front_m;
 	volatile float indiv_setpoint_mps;
 	volatile float platoon_setpoint_mps;
+	volatile float preceding_speed_mps;
+
 	volatile TickType_t speed_tick;
 	volatile TickType_t dist_tick;
 	volatile TickType_t indiv_setpoint_tick;
 	volatile TickType_t platoon_setpoint_tick;
+	volatile TickType_t preceding_speed_tick;
 } platoon_input_mailbox_t;
 
 typedef struct {
@@ -287,7 +295,8 @@ static bool in_mb_read_snapshot(PLATOON_inputs_t *out,
 		TickType_t *speed_tick,
 		TickType_t *dist_tick,
 		TickType_t *indiv_setpoint_tick,
-		TickType_t *platoon_setpoint_tick) {
+		TickType_t *platoon_setpoint_tick,
+		TickType_t *preceding_speed_tick) {
 	if (out == NULL) {
 		return false;
 	}
@@ -302,6 +311,7 @@ static bool in_mb_read_snapshot(PLATOON_inputs_t *out,
 		out->distance_to_front_m = g_in_mb.dist_to_front_m;
 		out->indiv_setpoint_mps = g_in_mb.indiv_setpoint_mps;
 		out->platoon_setpoint_mps = g_in_mb.platoon_setpoint_mps;
+		out->preceding_speed_mps = g_in_mb.preceding_speed_mps;
 
 		if (speed_tick) {
 			*speed_tick = g_in_mb.speed_tick;
@@ -314,6 +324,9 @@ static bool in_mb_read_snapshot(PLATOON_inputs_t *out,
 		}
 		if (platoon_setpoint_tick) {
 			*platoon_setpoint_tick = g_in_mb.platoon_setpoint_tick;
+		}
+		if (preceding_speed_tick) {
+			*preceding_speed_tick = g_in_mb.preceding_speed_tick;
 		}
 
 		uint32_t s2 = g_in_mb.seq;
@@ -411,6 +424,17 @@ void d_sub_cb(const void *msgin) {
 	in_mb_write_begin();
 	g_in_mb.dist_to_front_m = msg->data;
 	g_in_mb.dist_tick = xTaskGetTickCount();
+	in_mb_write_end();
+}
+
+void prec_v_cb(const void *msgin) {
+	const std_msgs__msg__Float32 *msg = (const std_msgs__msg__Float32*) msgin;
+	// DEBUG -------------------------------
+	g_dbg_dist_cb_count_total++;
+	// DEBUG -------------------------------
+	in_mb_write_begin();
+	g_in_mb.preceding_speed_mps = msg->data;
+	g_in_mb.preceding_speed_tick = xTaskGetTickCount();
 	in_mb_write_end();
 }
 
@@ -767,8 +791,12 @@ void StartUROSTask(void *argument)
 			ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
 			"veh_3/state/dist_to_veh"));
 
+	CHECK(rclc_subscription_init_best_effort(&prec_v_sub, &node,
+			ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
+			"veh_2/state/speed"));
+
 	executor = rclc_executor_get_zero_initialized_executor();
-	CHECK(rclc_executor_init(&executor, &support.context, 7, &allocator));
+	CHECK(rclc_executor_init(&executor, &support.context, 8, &allocator));
 
 	CHECK(rclc_executor_add_subscription(&executor, &pv_sub, &pv_msg, &pv_sub_cb,
 			ON_NEW_DATA));
@@ -777,6 +805,8 @@ void StartUROSTask(void *argument)
 	CHECK(rclc_executor_add_subscription(&executor, &plat_r_sub, &plat_r_msg, &platoon_setpoint_sub_cb,
 			ON_NEW_DATA));
 	CHECK(rclc_executor_add_subscription(&executor, &d_sub, &d_msg, &d_sub_cb,
+			ON_NEW_DATA));
+	CHECK(rclc_executor_add_subscription(&executor, &prec_v_sub, &prec_v_msg, &prec_v_cb,
 			ON_NEW_DATA));
 
 	// Ensure XRCE session synchronized after creating entities
@@ -794,6 +824,8 @@ void StartUROSTask(void *argument)
 	throttle_msg.data = 0.0f;
 	brake_msg.data = 0.0f;
 
+	prec_v_msg.data = 0.0f;
+
 	// Initialize mailboxes to known values and mark them as fresh "now".
 	TickType_t now = xTaskGetTickCount();
 	in_mb_write_begin();
@@ -801,10 +833,12 @@ void StartUROSTask(void *argument)
 	g_in_mb.dist_to_front_m = 0.0f;
 	g_in_mb.indiv_setpoint_mps = 0.0f;
 	g_in_mb.platoon_setpoint_mps = 0.0f;
+	g_in_mb.preceding_speed_mps = 0.0f;
 	g_in_mb.speed_tick = now;
 	g_in_mb.dist_tick = now;
 	g_in_mb.indiv_setpoint_tick = now;
 	g_in_mb.platoon_setpoint_tick = now;
+	g_in_mb.preceding_speed_tick = now;
 	in_mb_write_end();
 
 	out_mb_write_begin();
@@ -923,6 +957,7 @@ void StartCrtlTask(void *argument)
 	platoon_member.is_platooning = in_platoon; 
 
 	platoon_member.k_dist = 5.0f; // Should match Python platoon members
+	platoon_member.k_vel = 1.5;
 	platoon_member.min_spacing = 7.5f;
 	platoon_member.time_headway = 0.3f;
 
@@ -1002,8 +1037,9 @@ void StartCrtlTask(void *argument)
 			TickType_t dist_tick = 0;
 			TickType_t indiv_sp_tick = 0;
 			TickType_t platoon_sp_tick = 0;
+			TickType_t preceding_speed_tick = 0;
 			(void) in_mb_read_snapshot(&in, &speed_tick, &dist_tick, &indiv_sp_tick,
-					&platoon_sp_tick);
+					&platoon_sp_tick, &preceding_speed_tick);
 
 			// Wait briefly for distance (and platoon setpoint) to catch up to this tick.
 			// On USB-CDC/micro-ROS, topics can be delivered/processed skewed; stepping on fresh speed
@@ -1015,6 +1051,7 @@ void StartCrtlTask(void *argument)
 			const TickType_t sp_gate_target_age = pdMS_TO_TICKS(5);
 			TickType_t dist_tick_0 = dist_tick;
 			TickType_t platoon_sp_tick_0 = platoon_sp_tick;
+			TickType_t preceding_speed_tick_0 = preceding_speed_tick;
 
 			for (TickType_t waited = 0; waited < dist_gate_max_wait; waited += dist_gate_step) {
 				TickType_t dist_age = now_ctrl - dist_tick;
@@ -1030,7 +1067,7 @@ void StartCrtlTask(void *argument)
 				vTaskDelay(dist_gate_step);
 				now_ctrl = xTaskGetTickCount();
 				(void) in_mb_read_snapshot(&in, &speed_tick, &dist_tick, &indiv_sp_tick,
-						&platoon_sp_tick);
+						&platoon_sp_tick, &preceding_speed_tick);
 			}
 
 			// DEBUG -------------------------------
