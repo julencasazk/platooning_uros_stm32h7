@@ -156,9 +156,9 @@ vehicle_controller_params_t controller_params = {
     // ====================================================
     //      Gains for scheduling 
     .gains_low = {
-        .kd = 0.1089194f,
+        .kp = 0.1089194f,
         .ki = 0.04906409f,
-        .kp = 0.0f,
+        .kd = 0.0f,
         .n = 7.718222f,
     },
     .gains_mid = {
@@ -503,10 +503,6 @@ void pv_sub_cb(const void *msgin)
 	g_in_mb.speed_mps = msg->data;
 	g_in_mb.speed_tick = xTaskGetTickCount();
 	in_mb_write_end();
-	if (ctrlTaskHandle != NULL)
-	{
-		xTaskNotifyGive((TaskHandle_t)ctrlTaskHandle);
-	}
 }
 
 void d_sub_cb(const void *msgin)
@@ -1070,9 +1066,8 @@ void StartCrtlTask(void *argument)
 		vTaskDelete(NULL);
 	}
 
-
-	const TickType_t ctrlPeriod = pdMS_TO_TICKS(10);
-	TickType_t lastCompute = xTaskGetTickCount();
+	const TickType_t ctrlPeriod = pdMS_TO_TICKS(10); // 100 Hz - 10ms, matches PID tuning Ts
+	TickType_t lastWake = xTaskGetTickCount();
 
 	const TickType_t speedStale = pdMS_TO_TICKS(50);
 	const TickType_t distStale = pdMS_TO_TICKS(100);
@@ -1092,21 +1087,10 @@ void StartCrtlTask(void *argument)
 
 	for (;;)
 	{
-		// Wait for a new speed sample (sim tick marker).
-		(void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-		// Coalesce bursts: if multiple samples arrived, run once with the latest mailbox values.
-		while (ulTaskNotifyTake(pdTRUE, 0) > 0)
-		{
-		}
+		// Fixed 100 Hz control loop; use the latest mailbox snapshot each tick.
+		vTaskDelayUntil(&lastWake, ctrlPeriod);
 
-		// 100 Hz ceiling (wall-clock): if samples arrive faster than 10ms, delay.
 		TickType_t now_ctrl = xTaskGetTickCount();
-		TickType_t elapsed = now_ctrl - lastCompute;
-		if (elapsed < ctrlPeriod)
-		{
-			vTaskDelay(ctrlPeriod - elapsed);
-			now_ctrl = xTaskGetTickCount();
-		}
 
 		// DEBUG -------------------------------
 		static TickType_t prev_ctrl = 0;
@@ -1154,35 +1138,11 @@ void StartCrtlTask(void *argument)
 		TickType_t preceding_braking_intent_tick = 0;
 		(void)in_mb_read_snapshot(&in, &speed_tick, &dist_tick, &indiv_sp_tick,
 								  &platoon_sp_tick, &preceding_speed_tick, &preceding_braking_intent_tick);
-
-		// Wait briefly for distance (and platoon setpoint) to catch up to this tick.
-		// On USB-CDC/micro-ROS, topics can be delivered/processed skewed; stepping on fresh speed
-		// but stale distance causes late braking. This bounded wait reduces that skew without
-		// requiring stamped/sequence messages.
-		const TickType_t dist_gate_max_wait = pdMS_TO_TICKS(10);
-		const TickType_t dist_gate_step = pdMS_TO_TICKS(1);
-		const TickType_t dist_gate_target_age = pdMS_TO_TICKS(2);
-		const TickType_t sp_gate_target_age = pdMS_TO_TICKS(5);
-		TickType_t dist_tick_0 = dist_tick;
-		TickType_t platoon_sp_tick_0 = platoon_sp_tick;
-		TickType_t preceding_speed_tick_0 = preceding_speed_tick;
-		TickType_t preceding_braking_intent_tick_0 = preceding_braking_intent_tick;
-
-		for (TickType_t waited = 0; waited < dist_gate_max_wait; waited += dist_gate_step)
+		static TickType_t last_speed_tick = 0;
+		bool new_speed_sample = (speed_tick != last_speed_tick);
+		if (new_speed_sample)
 		{
-			TickType_t dist_age = now_ctrl - dist_tick;
-			TickType_t sp_age = now_ctrl - platoon_sp_tick;
-
-			// Prefer: get a newer distance sample; also try to keep platoon SP reasonably fresh.
-			if ((dist_age <= dist_gate_target_age && sp_age <= sp_gate_target_age) || (dist_tick != dist_tick_0 && platoon_sp_tick != platoon_sp_tick_0) || (dist_tick != dist_tick_0 && dist_age <= pdMS_TO_TICKS(5)))
-			{
-				break;
-			}
-
-			vTaskDelay(dist_gate_step);
-			now_ctrl = xTaskGetTickCount();
-			(void)in_mb_read_snapshot(&in, &speed_tick, &dist_tick, &indiv_sp_tick,
-									  &platoon_sp_tick, &preceding_speed_tick, &preceding_braking_intent_tick);
+			last_speed_tick = speed_tick;
 		}
 
 		// DEBUG -------------------------------
@@ -1209,6 +1169,12 @@ void StartCrtlTask(void *argument)
 		TickType_t now = now_ctrl;
 		bool speed_ok = ((TickType_t)(now - speed_tick) <= speedStale);
 		bool dist_ok = ((TickType_t)(now - dist_tick) <= distStale);
+
+		// Only step the controller on fresh speed samples. If stale, ramp down.
+		if (!new_speed_sample && speed_ok)
+		{
+			continue;
+		}
 
 		if (!dist_ok)
 		{
@@ -1264,8 +1230,6 @@ void StartCrtlTask(void *argument)
 		{
 			xTaskNotifyGive((TaskHandle_t)uROSTaskHandle);
 		}
-
-		lastCompute = now_ctrl;
 	}
 	/* USER CODE END StartCrtlTask */
 }
