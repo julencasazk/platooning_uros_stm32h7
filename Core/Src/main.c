@@ -36,8 +36,7 @@
 #include <stdbool.h>
 #include <string.h>
 
-#include <pid_stm32.h>
-#include "platooning.h"
+#include "vehicle_controller.h"
 
 #include "FreeRTOS.h"
 #include "task.h"
@@ -46,15 +45,6 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
-typedef struct
-{
-	float kp;
-	float ki;
-	float kd;
-	float n;
-
-} PID_Gains_TypeDef;
 
 /* USER CODE END PTD */
 
@@ -68,20 +58,32 @@ typedef struct
 
 volatile rcl_ret_t g_last_rc = RCL_RET_OK;
 char g_last_err[128] = {0};
+const char *g_last_check_expr = NULL;
+const char *g_last_check_file = NULL;
+volatile uint32_t g_last_check_line = 0;
 
-#define CHECK(fn)                                                     \
-  do {                                                                \
-    rcl_ret_t rc_ = (fn);                                             \
-    if (rc_ != RCL_RET_OK) {                                          \
-      g_last_rc = rc_;                                                \
-      const rcl_error_string_t err = rcl_get_error_string();          \
-      strncpy(g_last_err, err.str, sizeof(g_last_err) - 1);           \
-      g_last_err[sizeof(g_last_err) - 1] = '\0';                      \
-      HAL_GPIO_WritePin(GPIOE, GPIO_PIN_1, GPIO_PIN_SET);             \
-      __BKPT(0);                                                      \
-      while (1) { __NOP(); }                                          \
-    }                                                                 \
-  } while (0)
+#define CHECK(fn)                                                  \
+	do                                                             \
+	{                                                              \
+		rcl_ret_t rc_ = (fn);                                      \
+		if (rc_ != RCL_RET_OK)                                     \
+		{                                                          \
+			g_last_rc = rc_;                                       \
+			g_last_check_expr = #fn;                                \
+			g_last_check_file = __FILE__;                           \
+			g_last_check_line = (uint32_t)__LINE__;                 \
+			const rcl_error_string_t err = rcl_get_error_string(); \
+			strncpy(g_last_err, err.str, sizeof(g_last_err) - 1);  \
+			g_last_err[sizeof(g_last_err) - 1] = '\0';             \
+			rcl_reset_error();                                      \
+			HAL_GPIO_WritePin(GPIOE, GPIO_PIN_1, GPIO_PIN_SET);    \
+			__BKPT(0);                                             \
+			while (1)                                              \
+			{                                                      \
+				__NOP();                                           \
+			}                                                      \
+		}                                                          \
+	} while (0)
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -91,28 +93,119 @@ UART_HandleTypeDef huart2;
 /* Definitions for uROSTask */
 osThreadId_t uROSTaskHandle;
 const osThreadAttr_t uROSTask_attributes = {
-  .name = "uROSTask",
-  .stack_size = 3000 * 4,
-  .priority = (osPriority_t) osPriorityNormal,
+	.name = "uROSTask",
+	.stack_size = 3000 * 4,
+	.priority = (osPriority_t)osPriorityNormal,
 };
 /* Definitions for ctrlTask */
 osThreadId_t ctrlTaskHandle;
 const osThreadAttr_t ctrlTask_attributes = {
-  .name = "ctrlTask",
-  .stack_size = 128 * 4,
-  .priority = (osPriority_t) osPriorityBelowNormal7,
+	.name = "ctrlTask",
+	.stack_size = 128 * 4,
+	.priority = (osPriority_t)osPriorityBelowNormal7,
 };
 /* USER CODE BEGIN PV */
+
+// New vehicle controller and params
+// ==============================================
+volatile vehicle_controller_t vehicle_controller;    
+
+// Vehicle controller immutable params.
+// Should match Python node's values
+vehicle_controller_params_t controller_params = {
+    // Platoon position, MUST match the --mcu-index arg when
+    // launching the CARLA test
+    .platoon_index = 3,
+    // Spacing setpoint changing params
+    .desired_time_headway_s = 0.1f,
+    .min_spacing_m = 4.0f,
+    .k_dist = 1.0f,
+    .k_vel = 1.0f,
+    .k_brake = 2.0f,
+    // Brake maps for braking intent
+    // TODO change placeholders with CARLA mapping
+    .brake_map_low = {
+        .min_decel = 1.0f,
+        .max_decel = 5.0f,
+        .min_brake = 0.05f,
+        .max_brake = 0.5f,
+    },
+    .brake_map_mid = {
+        .min_decel = 1.0f,
+        .max_decel = 6.0f,
+        .min_brake = 0.05f,
+        .max_brake = 0.5f,
+    },
+    .brake_map_high = {
+        .min_decel = 1.0f,
+        .max_decel = 8.0f,
+        .min_brake = 0.05f,
+        .max_brake = 0.5f,
+    },
+    // Speed gain scheduling config
+    .speed_sp_min_mps = 0.0f,
+    .speed_sp_max_mps = 33.33f,
+    .v1_mps = 11.11f,
+    .v2_mps = 22.22f,
+    .hysteresis_mps = 1.0f,
+    // Braking supervisor config
+    .brake_enable = true,
+	.brake_deadband = 0.02f,
+    .brake_rate_limit_per_s = 1.0f,
+    // PID Parameters
+    // ====================================================
+    //      Gains for scheduling 
+    .gains_low = {
+        .kd = 0.1089194f,
+        .ki = 0.04906409f,
+        .kp = 0.0f,
+        .n = 7.718222f,
+    },
+    .gains_mid = {
+		.kp = 0.11494122f,
+		.ki = 0.0489494f,
+		.kd = 0.0f,
+		.n = 5.0f,
+    },
+    .gains_high = {
+        .kp = 0.19021246f,
+        .ki = 0.15704399f,
+        .kd = 0.0f,
+        .n = 12.70886655f,
+    },
+    // =====================================================
+    // Brake gates and histeresis
+    .dist_off_m = 0.5f,
+	.dist_on_m = 1.0f,
+	.ttc_on_s = 2.5f,
+	.ttc_off_s = 3.2f,
+	.v_margin_on_mps = 0.5f,
+	.v_margin_off_mps = 0.2f,
+	// Deccel targets
+	.decel_mild = 1.0f,
+	.decel_mod = 2.5f,
+	.decel_full = 5.0f,
+	// Cooperative braking intent handling
+	.coop_enable = true,
+	.coop_timeout_s = 0.3f,
+	.coop_gain = 2.0f,
+	.coop_decel_off = 0.1f,
+	.coop_decel_on = 0.2f,
+	.pid_ts_s = 0.01f,
+	.tick_hz = configTICK_RATE_HZ
+
+};
+// ==============================================
 
 // DEBUGGING vars
 // ---- Timing debug (ticks; with 1kHz tick, 1 tick ~= 1ms) ----
 volatile TickType_t g_dbg_ctrl_tick = 0;
 volatile TickType_t g_dbg_uros_tick = 0;
 
-	volatile TickType_t g_dbg_ctrl_period_ticks = 0;
-	volatile TickType_t g_dbg_uros_spin_period_ticks = 0;
-	// DEBUG ----- max gap between executor spins (ticks; 1 tick ~= 1ms at 1kHz)
-	volatile TickType_t g_dbg_uros_spin_gap_max_ticks = 0;
+volatile TickType_t g_dbg_ctrl_period_ticks = 0;
+volatile TickType_t g_dbg_uros_spin_period_ticks = 0;
+// DEBUG ----- max gap between executor spins (ticks; 1 tick ~= 1ms at 1kHz)
+volatile TickType_t g_dbg_uros_spin_gap_max_ticks = 0;
 
 volatile TickType_t g_dbg_uros_last_pub_tick = 0;
 volatile TickType_t g_dbg_ctrl_phase_since_pub_ticks = 0;
@@ -127,7 +220,7 @@ volatile TickType_t g_dbg_ctrl_speed_age_ticks_min = 0xFFFFFFFFu;
 volatile TickType_t g_dbg_ctrl_dist_age_ticks_min = 0xFFFFFFFFu;
 volatile TickType_t g_dbg_ctrl_platoon_sp_age_ticks_min = 0xFFFFFFFFu;
 
-volatile TickType_t g_dbg_uros_cmd_age_ticks = 0;       
+volatile TickType_t g_dbg_uros_cmd_age_ticks = 0;
 volatile TickType_t g_dbg_uros_cmd_age_min_ticks = 0xFFFFFFFFu;
 volatile TickType_t g_dbg_uros_cmd_age_max_ticks = 0;
 
@@ -149,19 +242,21 @@ volatile TickType_t g_dbg_hz_window_start_tick = 0;
 
 // Platoon participation config
 const char *participant_name = "veh_3";
-uint8_t member_index = 3;
-PLATOON_platoon_enabled_TypeDef in_platoon = _PLATOON_ENABLED; 
+volatile bool platoon_enabled = true;
 
 // Publishers
 rcl_publisher_t throttle_pub;
 rcl_publisher_t brake_pub;
+rcl_publisher_t braking_intent_pub;
+rcl_publisher_t local_sp_pub;
 
 // Subscribers
-rcl_subscription_t r_sub; // Speed setpoint
-rcl_subscription_t pv_sub; // Current speed reading
-rcl_subscription_t d_sub; // Distance to the car ahead
-rcl_subscription_t plat_r_sub; // Platoon speed setpoint
-rcl_subscription_t prec_v_sub; // Speed of the preceding vehicle
+rcl_subscription_t r_sub;				   // Speed setpoint
+rcl_subscription_t pv_sub;				   // Current speed reading
+rcl_subscription_t d_sub;				   // Distance to the car ahead
+rcl_subscription_t plat_r_sub;			   // Platoon speed setpoint
+rcl_subscription_t prec_v_sub;			   // Speed of the preceding vehicle
+rcl_subscription_t prec_deccel_intent_sub; // Preceding vehicle braking intent in mps2
 // rcl_subscription_t in_platoon_msg; // For later >:P
 
 // Message typedef to store readings in subscription callbacks
@@ -170,54 +265,21 @@ std_msgs__msg__Float32 plat_r_msg;
 std_msgs__msg__Float32 pv_msg;
 std_msgs__msg__Float32 d_msg;
 std_msgs__msg__Float32 prec_v_msg;
+std_msgs__msg__Float32 prec_deccel_intent_msg;
+
 
 // volatile sts_msgs__msg__Bool in_platoon_msg; // For later >:P
 
 // Message typedef to store data before publishing
 std_msgs__msg__Float32 throttle_msg;
 std_msgs__msg__Float32 brake_msg;
+std_msgs__msg__Float32 braking_intent_msg;
+std_msgs__msg__Float32 local_sp_msg;
 
 rclc_support_t support;
 rcl_allocator_t allocator;
 rcl_node_t node;
 rclc_executor_t executor;
-
-// Speed PID controller
-pid_controller_t speed_pid;
-// PID gains for different speeds
-PID_Gains_TypeDef low_gains = {
-	.kp = 0.43127789,
-	.ki = 0.43676547,
-	.kd = 0.0,
-	.n = 15.0
-};
-
-PID_Gains_TypeDef mid_gains = {
-	.kp = 0.11675119,
-	.ki = 0.085938,
-	.kd = 0.0,
-	.n = 14.90530836
-};
-
-PID_Gains_TypeDef high_gains = {
-	.kp = 0.13408096,
-	.ki = 0.07281374,
-	.kd =  0.0,
-	.n = 12.16810135
-};
-
-// Speed range thresholds
-float thresh_low_mid = 11.11111f;
-float thresh_mid_high = 22.22222f;
-
-// Histeresis band in m/s
-float hist = 1.0f;
-
-int8_t current_range; // 0-> Low, 1-> Mid, 2 -> High 
-int8_t prev_range;
-
-// Platoon member
-PLATOON_member_t platoon_member;
 
 uint32_t rx_count = 0;
 // TODO Remove button use, not useful in this project
@@ -241,69 +303,86 @@ void StartCrtlTask(void *argument);
 bool cubemx_transport_open(struct uxrCustomTransport *transport);
 bool cubemx_transport_close(struct uxrCustomTransport *transport);
 size_t cubemx_transport_write(struct uxrCustomTransport *transport,
-		const uint8_t *buf, size_t len, uint8_t *err);
+							  const uint8_t *buf, size_t len, uint8_t *err);
 size_t cubemx_transport_read(struct uxrCustomTransport *transport, uint8_t *buf,
-		size_t len, int timeout, uint8_t *err);
+							 size_t len, int timeout, uint8_t *err);
 
-void* microros_allocate(size_t size, void *state);
+void *microros_allocate(size_t size, void *state);
 void microros_deallocate(void *pointer, void *state);
-void* microros_reallocate(void *pointer, size_t size, void *state);
-void* microros_zero_allocate(size_t number_of_elements, size_t size_of_element,
-		void *state);
-
-float uros_get_speed(void);
-float uros_get_dist(void);
-float uros_get_controller_action(float speed, float setpoint);
-
+void *microros_reallocate(void *pointer, size_t size, void *state);
+void *microros_zero_allocate(size_t number_of_elements, size_t size_of_element,
+							 void *state);
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-typedef struct {
+typedef struct
+{
 	volatile uint32_t seq;
 	volatile float speed_mps;
 	volatile float dist_to_front_m;
 	volatile float indiv_setpoint_mps;
 	volatile float platoon_setpoint_mps;
 	volatile float preceding_speed_mps;
+	volatile float preceding_braking_intent_mps2;
 
 	volatile TickType_t speed_tick;
 	volatile TickType_t dist_tick;
 	volatile TickType_t indiv_setpoint_tick;
 	volatile TickType_t platoon_setpoint_tick;
 	volatile TickType_t preceding_speed_tick;
+	volatile TickType_t preceding_braking_intent_tick;
 } platoon_input_mailbox_t;
 
-typedef struct {
+typedef struct
+{
 	volatile uint32_t seq;
 	volatile float throttle;
 	volatile float brake;
+	volatile float braking_intent;
+	volatile float local_sp;
 	volatile TickType_t computed_tick;
 } platoon_output_mailbox_t;
 
-static platoon_input_mailbox_t g_in_mb = { 0 };
-static platoon_output_mailbox_t g_out_mb = { 0 };
+typedef struct
+{
+	float speed_mps;
+	float distance_to_front_m;
+	float indiv_setpoint_mps;
+	float platoon_setpoint_mps;
+	float preceding_speed_mps;
+	float preceding_braking_intent_mps2;
+} ctrl_inputs_snapshot_t;
+
+static platoon_input_mailbox_t g_in_mb = {0};
+static platoon_output_mailbox_t g_out_mb = {0};
+
+static volatile uint8_t g_have_preceding_braking_intent = 0;
 
 static inline void in_mb_write_begin(void) { g_in_mb.seq++; }
 static inline void in_mb_write_end(void) { g_in_mb.seq++; }
 static inline void out_mb_write_begin(void) { g_out_mb.seq++; }
 static inline void out_mb_write_end(void) { g_out_mb.seq++; }
 
-static bool in_mb_read_snapshot(PLATOON_inputs_t *out,
-		TickType_t *speed_tick,
-		TickType_t *dist_tick,
-		TickType_t *indiv_setpoint_tick,
-		TickType_t *platoon_setpoint_tick,
-		TickType_t *preceding_speed_tick) {
-	if (out == NULL) {
+static bool in_mb_read_snapshot(ctrl_inputs_snapshot_t *out,
+								TickType_t *speed_tick,
+								TickType_t *dist_tick,
+								TickType_t *indiv_setpoint_tick,
+								TickType_t *platoon_setpoint_tick,
+								TickType_t *preceding_speed_tick,
+								TickType_t *preceding_braking_intent_tick)
+{
+	if (out == NULL)
+	{
 		return false;
 	}
-
-	for (uint32_t tries = 0; tries < 8; tries++) {
+	for (uint32_t tries = 0; tries < 8; tries++)
+	{
 		uint32_t s1 = g_in_mb.seq;
-		if (s1 & 1u) {
+		if (s1 & 1u)
+		{
 			continue;
 		}
 
@@ -312,25 +391,36 @@ static bool in_mb_read_snapshot(PLATOON_inputs_t *out,
 		out->indiv_setpoint_mps = g_in_mb.indiv_setpoint_mps;
 		out->platoon_setpoint_mps = g_in_mb.platoon_setpoint_mps;
 		out->preceding_speed_mps = g_in_mb.preceding_speed_mps;
+		out->preceding_braking_intent_mps2 = g_in_mb.preceding_braking_intent_mps2;
 
-		if (speed_tick) {
+		if (speed_tick)
+		{
 			*speed_tick = g_in_mb.speed_tick;
 		}
-		if (dist_tick) {
+		if (dist_tick)
+		{
 			*dist_tick = g_in_mb.dist_tick;
 		}
-		if (indiv_setpoint_tick) {
+		if (indiv_setpoint_tick)
+		{
 			*indiv_setpoint_tick = g_in_mb.indiv_setpoint_tick;
 		}
-		if (platoon_setpoint_tick) {
+		if (platoon_setpoint_tick)
+		{
 			*platoon_setpoint_tick = g_in_mb.platoon_setpoint_tick;
 		}
-		if (preceding_speed_tick) {
+		if (preceding_speed_tick)
+		{
 			*preceding_speed_tick = g_in_mb.preceding_speed_tick;
+		}
+		if (preceding_braking_intent_tick)
+		{
+			*preceding_braking_intent_tick = g_in_mb.preceding_braking_intent_tick;
 		}
 
 		uint32_t s2 = g_in_mb.seq;
-		if (s1 == s2) {
+		if (s1 == s2)
+		{
 			return true;
 		}
 	}
@@ -338,22 +428,29 @@ static bool in_mb_read_snapshot(PLATOON_inputs_t *out,
 	return false;
 }
 
-static bool out_mb_read_snapshot(float *throttle, float *brake) {
-	if (throttle == NULL || brake == NULL) {
+static bool out_mb_read_snapshot(float *throttle, float *brake, float *brake_intent, float *local_sp)
+{
+	if (throttle == NULL || brake == NULL || brake_intent == NULL || local_sp == NULL)
+	{
 		return false;
 	}
 
-	for (uint32_t tries = 0; tries < 8; tries++) {
+	for (uint32_t tries = 0; tries < 8; tries++)
+	{
 		uint32_t s1 = g_out_mb.seq;
-		if (s1 & 1u) {
+		if (s1 & 1u)
+		{
 			continue;
 		}
 
 		*throttle = g_out_mb.throttle;
 		*brake = g_out_mb.brake;
+		*brake_intent = g_out_mb.braking_intent;
+		*local_sp = g_out_mb.local_sp;
 
 		uint32_t s2 = g_out_mb.seq;
-		if (s1 == s2) {
+		if (s1 == s2)
+		{
 			return true;
 		}
 	}
@@ -361,36 +458,29 @@ static bool out_mb_read_snapshot(float *throttle, float *brake) {
 	return false;
 }
 
-static inline float ramp_towards_zero(float value, float step) {
-	if (value > step) {
+static inline float ramp_towards_zero(float value, float step)
+{
+	if (value > step)
+	{
 		return value - step;
 	}
 	return 0.0f;
 }
 
-// Helper function to set gains of the speed PID depending on threshold +- histeresis
-pid_err_t set_gains_local(pid_controller_t* pid,PID_Gains_TypeDef* gains) 
-{
-	pid_set_kp(pid, gains->kp);
-	pid_set_ki(pid, gains->ki);
-	pid_set_kd(pid, gains->kd);
-	pid_set_n(pid, gains->n);
-	pid_reset(pid);
-	return _PID_OK;
-}
-
 // micro-ROS topic callback functions
 // ======================================================================
-void indiv_setpoint_sub_cb(const void *msgin) {
-	const std_msgs__msg__Float32 *msg = (const std_msgs__msg__Float32*) msgin;
+void indiv_setpoint_sub_cb(const void *msgin)
+{
+	const std_msgs__msg__Float32 *msg = (const std_msgs__msg__Float32 *)msgin;
 	in_mb_write_begin();
 	g_in_mb.indiv_setpoint_mps = msg->data;
 	g_in_mb.indiv_setpoint_tick = xTaskGetTickCount();
 	in_mb_write_end();
 }
 
-void platoon_setpoint_sub_cb(const void *msgin) {
-	const std_msgs__msg__Float32 *msg = (const std_msgs__msg__Float32*) msgin;
+void platoon_setpoint_sub_cb(const void *msgin)
+{
+	const std_msgs__msg__Float32 *msg = (const std_msgs__msg__Float32 *)msgin;
 	// DEBUG -------------------------------
 	g_dbg_platoon_sp_cb_count_total++;
 	// DEBUG -------------------------------
@@ -400,9 +490,10 @@ void platoon_setpoint_sub_cb(const void *msgin) {
 	in_mb_write_end();
 }
 
-// Speed setpoint (PV) is the reference sim "tick". The PID runs when a new speed value is read.
-void pv_sub_cb(const void *msgin) {
-	const std_msgs__msg__Float32 *msg = (const std_msgs__msg__Float32*) msgin;
+// Speed is the reference sim "tick". The PID runs when a new speed value is read.
+void pv_sub_cb(const void *msgin)
+{
+	const std_msgs__msg__Float32 *msg = (const std_msgs__msg__Float32 *)msgin;
 	// DEBUG -------------------------------
 	g_dbg_speed_cb_count_total++;
 	// DEBUG -------------------------------
@@ -410,14 +501,15 @@ void pv_sub_cb(const void *msgin) {
 	g_in_mb.speed_mps = msg->data;
 	g_in_mb.speed_tick = xTaskGetTickCount();
 	in_mb_write_end();
-	// Wake control task: treat speed as the sim "tick marker" (one control step per new speed sample).
-	if (ctrlTaskHandle != NULL) {
-		xTaskNotifyGive((TaskHandle_t) ctrlTaskHandle);
+	if (ctrlTaskHandle != NULL)
+	{
+		xTaskNotifyGive((TaskHandle_t)ctrlTaskHandle);
 	}
 }
 
-void d_sub_cb(const void *msgin) {
-	const std_msgs__msg__Float32 *msg = (const std_msgs__msg__Float32*) msgin;
+void d_sub_cb(const void *msgin)
+{
+	const std_msgs__msg__Float32 *msg = (const std_msgs__msg__Float32 *)msgin;
 	// DEBUG -------------------------------
 	g_dbg_dist_cb_count_total++;
 	// DEBUG -------------------------------
@@ -427,10 +519,11 @@ void d_sub_cb(const void *msgin) {
 	in_mb_write_end();
 }
 
-void prec_v_cb(const void *msgin) {
-	const std_msgs__msg__Float32 *msg = (const std_msgs__msg__Float32*) msgin;
+void prec_v_cb(const void *msgin)
+{
+	const std_msgs__msg__Float32 *msg = (const std_msgs__msg__Float32 *)msgin;
 	// DEBUG -------------------------------
-	g_dbg_dist_cb_count_total++;
+	g_dbg_dist_cb_count_total++; // TODO add appropiate debug signal
 	// DEBUG -------------------------------
 	in_mb_write_begin();
 	g_in_mb.preceding_speed_mps = msg->data;
@@ -438,270 +531,275 @@ void prec_v_cb(const void *msgin) {
 	in_mb_write_end();
 }
 
+void prec_braking_intent_cb(const void *msgin)
+{
+	const std_msgs__msg__Float32 *msg = (const std_msgs__msg__Float32 *)msgin;
+	// DEBUG -------------------------------
+	g_dbg_dist_cb_count_total++; // TODO add appropiate debug signal
+	// DEBUG -------------------------------
+	in_mb_write_begin();
+	g_in_mb.preceding_braking_intent_mps2 = msg->data;
+	g_in_mb.preceding_braking_intent_tick = xTaskGetTickCount();
+	g_have_preceding_braking_intent = 1;
+	in_mb_write_end();
+}
+
 // =========================================================================
 // END micro-ROS topic callbacks
-
-// Platooning function implementations
-// ========================================================================
-
-
-float uros_get_controller_action(float speed, float setpoint) {
-	return pid_run(&speed_pid, setpoint, speed);
-}
 
 /* USER CODE END 0 */
 
 /**
-  * @brief  The application entry point.
-  * @retval int
-  */
+ * @brief  The application entry point.
+ * @retval int
+ */
 int main(void)
 {
 
-  /* USER CODE BEGIN 1 */
+	/* USER CODE BEGIN 1 */
 
+	/* USER CODE END 1 */
 
-  /* USER CODE END 1 */
+	/* MCU Configuration--------------------------------------------------------*/
 
-  /* MCU Configuration--------------------------------------------------------*/
+	/* Reset of all peripherals, Initializes the Flash interface and the Systick. */
+	HAL_Init();
 
-  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
-  HAL_Init();
+	/* USER CODE BEGIN Init */
 
-  /* USER CODE BEGIN Init */
+	/* USER CODE END Init */
 
-  /* USER CODE END Init */
+	/* Configure the system clock */
+	SystemClock_Config();
 
-  /* Configure the system clock */
-  SystemClock_Config();
+	/* USER CODE BEGIN SysInit */
 
-  /* USER CODE BEGIN SysInit */
+	/* USER CODE END SysInit */
 
-  /* USER CODE END SysInit */
+	/* Initialize all configured peripherals */
+	MX_GPIO_Init();
+	MX_USART2_UART_Init();
+	/* USER CODE BEGIN 2 */
 
-  /* Initialize all configured peripherals */
-  MX_GPIO_Init();
-  MX_USART2_UART_Init();
-  /* USER CODE BEGIN 2 */
+	/* USER CODE END 2 */
 
-  /* USER CODE END 2 */
+	/* Init scheduler */
+	osKernelInitialize();
 
-  /* Init scheduler */
-  osKernelInitialize();
-
-  /* USER CODE BEGIN RTOS_MUTEX */
+	/* USER CODE BEGIN RTOS_MUTEX */
 	/* add mutexes, ... */
-  /* USER CODE END RTOS_MUTEX */
+	/* USER CODE END RTOS_MUTEX */
 
-  /* USER CODE BEGIN RTOS_SEMAPHORES */
+	/* USER CODE BEGIN RTOS_SEMAPHORES */
 	/* add semaphores, ... */
-  /* USER CODE END RTOS_SEMAPHORES */
+	/* USER CODE END RTOS_SEMAPHORES */
 
-  /* USER CODE BEGIN RTOS_TIMERS */
+	/* USER CODE BEGIN RTOS_TIMERS */
 	/* start timers, add new ones, ... */
-  /* USER CODE END RTOS_TIMERS */
+	/* USER CODE END RTOS_TIMERS */
 
-  /* USER CODE BEGIN RTOS_QUEUES */
+	/* USER CODE BEGIN RTOS_QUEUES */
 	/* add queues, ... */
-  /* USER CODE END RTOS_QUEUES */
+	/* USER CODE END RTOS_QUEUES */
 
-  /* Create the thread(s) */
-  /* creation of uROSTask */
-  uROSTaskHandle = osThreadNew(StartUROSTask, NULL, &uROSTask_attributes);
+	/* Create the thread(s) */
+	/* creation of uROSTask */
+	uROSTaskHandle = osThreadNew(StartUROSTask, NULL, &uROSTask_attributes);
 
-  /* creation of ctrlTask */
-  ctrlTaskHandle = osThreadNew(StartCrtlTask, NULL, &ctrlTask_attributes);
+	/* creation of ctrlTask */
+	ctrlTaskHandle = osThreadNew(StartCrtlTask, NULL, &ctrlTask_attributes);
 
-  /* USER CODE BEGIN RTOS_THREADS */
+	/* USER CODE BEGIN RTOS_THREADS */
 	/* add threads, ... */
-  /* USER CODE END RTOS_THREADS */
+	/* USER CODE END RTOS_THREADS */
 
-  /* USER CODE BEGIN RTOS_EVENTS */
+	/* USER CODE BEGIN RTOS_EVENTS */
 	/* add events, ... */
-  /* USER CODE END RTOS_EVENTS */
+	/* USER CODE END RTOS_EVENTS */
 
-  /* Start scheduler */
-  osKernelStart();
+	/* Start scheduler */
+	osKernelStart();
 
-  /* We should never get here as control is now taken by the scheduler */
+	/* We should never get here as control is now taken by the scheduler */
 
-  /* Infinite loop */
-  /* USER CODE BEGIN WHILE */
-	while (1) {
-    /* USER CODE END WHILE */
+	/* Infinite loop */
+	/* USER CODE BEGIN WHILE */
+	while (1)
+	{
+		/* USER CODE END WHILE */
 
-    /* USER CODE BEGIN 3 */
+		/* USER CODE BEGIN 3 */
 	}
-  /* USER CODE END 3 */
+	/* USER CODE END 3 */
 }
 
 /**
-  * @brief System Clock Configuration
-  * @retval None
-  */
+ * @brief System Clock Configuration
+ * @retval None
+ */
 void SystemClock_Config(void)
 {
-  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
-  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+	RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+	RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-  /** Supply configuration update enable
-  */
-  HAL_PWREx_ConfigSupply(PWR_LDO_SUPPLY);
+	/** Supply configuration update enable
+	 */
+	HAL_PWREx_ConfigSupply(PWR_LDO_SUPPLY);
 
-  /** Configure the main internal regulator output voltage
-  */
-  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE2);
+	/** Configure the main internal regulator output voltage
+	 */
+	__HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE2);
 
-  while(!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
+	while (!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY))
+	{
+	}
 
-  /** Initializes the RCC Oscillators according to the specified parameters
-  * in the RCC_OscInitTypeDef structure.
-  */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
-  RCC_OscInitStruct.HSIState = RCC_HSI_DIV1;
-  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
-  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
-  {
-    Error_Handler();
-  }
+	/** Initializes the RCC Oscillators according to the specified parameters
+	 * in the RCC_OscInitTypeDef structure.
+	 */
+	RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+	RCC_OscInitStruct.HSIState = RCC_HSI_DIV1;
+	RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+	RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+	if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+	{
+		Error_Handler();
+	}
 
-  /** Initializes the CPU, AHB and APB buses clocks
-  */
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
-                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2
-                              |RCC_CLOCKTYPE_D3PCLK1|RCC_CLOCKTYPE_D1PCLK1;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
-  RCC_ClkInitStruct.SYSCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.AHBCLKDivider = RCC_HCLK_DIV1;
-  RCC_ClkInitStruct.APB3CLKDivider = RCC_APB3_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_APB1_DIV1;
-  RCC_ClkInitStruct.APB2CLKDivider = RCC_APB2_DIV1;
-  RCC_ClkInitStruct.APB4CLKDivider = RCC_APB4_DIV1;
+	/** Initializes the CPU, AHB and APB buses clocks
+	 */
+	RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2 | RCC_CLOCKTYPE_D3PCLK1 | RCC_CLOCKTYPE_D1PCLK1;
+	RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
+	RCC_ClkInitStruct.SYSCLKDivider = RCC_SYSCLK_DIV1;
+	RCC_ClkInitStruct.AHBCLKDivider = RCC_HCLK_DIV1;
+	RCC_ClkInitStruct.APB3CLKDivider = RCC_APB3_DIV1;
+	RCC_ClkInitStruct.APB1CLKDivider = RCC_APB1_DIV1;
+	RCC_ClkInitStruct.APB2CLKDivider = RCC_APB2_DIV1;
+	RCC_ClkInitStruct.APB4CLKDivider = RCC_APB4_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_1) != HAL_OK)
-  {
-    Error_Handler();
-  }
+	if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_1) != HAL_OK)
+	{
+		Error_Handler();
+	}
 }
 
 /**
-  * @brief USART2 Initialization Function
-  * @param None
-  * @retval None
-  */
+ * @brief USART2 Initialization Function
+ * @param None
+ * @retval None
+ */
 static void MX_USART2_UART_Init(void)
 {
 
-  /* USER CODE BEGIN USART2_Init 0 */
+	/* USER CODE BEGIN USART2_Init 0 */
 
-  /* USER CODE END USART2_Init 0 */
+	/* USER CODE END USART2_Init 0 */
 
-  /* USER CODE BEGIN USART2_Init 1 */
+	/* USER CODE BEGIN USART2_Init 1 */
 
-  /* USER CODE END USART2_Init 1 */
-  huart2.Instance = USART2;
-  huart2.Init.BaudRate = 460800;
-  huart2.Init.WordLength = UART_WORDLENGTH_8B;
-  huart2.Init.StopBits = UART_STOPBITS_1;
-  huart2.Init.Parity = UART_PARITY_NONE;
-  huart2.Init.Mode = UART_MODE_TX_RX;
-  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
-  huart2.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
-  huart2.Init.ClockPrescaler = UART_PRESCALER_DIV1;
-  huart2.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
-  if (HAL_UART_Init(&huart2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_SetTxFifoThreshold(&huart2, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_SetRxFifoThreshold(&huart2, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_DisableFifoMode(&huart2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN USART2_Init 2 */
+	/* USER CODE END USART2_Init 1 */
+	huart2.Instance = USART2;
+	huart2.Init.BaudRate = 460800;
+	huart2.Init.WordLength = UART_WORDLENGTH_8B;
+	huart2.Init.StopBits = UART_STOPBITS_1;
+	huart2.Init.Parity = UART_PARITY_NONE;
+	huart2.Init.Mode = UART_MODE_TX_RX;
+	huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+	huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+	huart2.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+	huart2.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+	huart2.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+	if (HAL_UART_Init(&huart2) != HAL_OK)
+	{
+		Error_Handler();
+	}
+	if (HAL_UARTEx_SetTxFifoThreshold(&huart2, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
+	{
+		Error_Handler();
+	}
+	if (HAL_UARTEx_SetRxFifoThreshold(&huart2, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
+	{
+		Error_Handler();
+	}
+	if (HAL_UARTEx_DisableFifoMode(&huart2) != HAL_OK)
+	{
+		Error_Handler();
+	}
+	/* USER CODE BEGIN USART2_Init 2 */
 
-  /* USER CODE END USART2_Init 2 */
-
+	/* USER CODE END USART2_Init 2 */
 }
 
 /**
-  * @brief GPIO Initialization Function
-  * @param None
-  * @retval None
-  */
+ * @brief GPIO Initialization Function
+ * @param None
+ * @retval None
+ */
 static void MX_GPIO_Init(void)
 {
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
-  /* USER CODE BEGIN MX_GPIO_Init_1 */
+	GPIO_InitTypeDef GPIO_InitStruct = {0};
+	/* USER CODE BEGIN MX_GPIO_Init_1 */
 
-  /* USER CODE END MX_GPIO_Init_1 */
+	/* USER CODE END MX_GPIO_Init_1 */
 
-  /* GPIO Ports Clock Enable */
-  __HAL_RCC_GPIOC_CLK_ENABLE();
-  __HAL_RCC_GPIOH_CLK_ENABLE();
-  __HAL_RCC_GPIOB_CLK_ENABLE();
-  __HAL_RCC_GPIOD_CLK_ENABLE();
-  __HAL_RCC_GPIOE_CLK_ENABLE();
+	/* GPIO Ports Clock Enable */
+	__HAL_RCC_GPIOC_CLK_ENABLE();
+	__HAL_RCC_GPIOH_CLK_ENABLE();
+	__HAL_RCC_GPIOB_CLK_ENABLE();
+	__HAL_RCC_GPIOD_CLK_ENABLE();
+	__HAL_RCC_GPIOE_CLK_ENABLE();
 
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, LD1_Pin|LD3_Pin|LD2_Pin, GPIO_PIN_RESET);
+	/*Configure GPIO pin Output Level */
+	HAL_GPIO_WritePin(GPIOB, LD1_Pin | LD3_Pin | LD2_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOE, GPIO_PIN_1, GPIO_PIN_RESET);
+	/*Configure GPIO pin Output Level */
+	HAL_GPIO_WritePin(GPIOE, GPIO_PIN_1, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin : PC13 */
-  GPIO_InitStruct.Pin = GPIO_PIN_13;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+	/*Configure GPIO pin : PC13 */
+	GPIO_InitStruct.Pin = GPIO_PIN_13;
+	GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : LD1_Pin LD3_Pin LD2_Pin */
-  GPIO_InitStruct.Pin = LD1_Pin|LD3_Pin|LD2_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+	/*Configure GPIO pins : LD1_Pin LD3_Pin LD2_Pin */
+	GPIO_InitStruct.Pin = LD1_Pin | LD3_Pin | LD2_Pin;
+	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+	HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : STLINK_RX_Pin STLINK_TX_Pin */
-  GPIO_InitStruct.Pin = STLINK_RX_Pin|STLINK_TX_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  GPIO_InitStruct.Alternate = GPIO_AF7_USART3;
-  HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+	/*Configure GPIO pins : STLINK_RX_Pin STLINK_TX_Pin */
+	GPIO_InitStruct.Pin = STLINK_RX_Pin | STLINK_TX_Pin;
+	GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+	GPIO_InitStruct.Alternate = GPIO_AF7_USART3;
+	HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : PE1 */
-  GPIO_InitStruct.Pin = GPIO_PIN_1;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
+	/*Configure GPIO pin : PE1 */
+	GPIO_InitStruct.Pin = GPIO_PIN_1;
+	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+	HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
-  /* EXTI interrupt init*/
-  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 5, 0);
-  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
+	/* EXTI interrupt init*/
+	HAL_NVIC_SetPriority(EXTI15_10_IRQn, 5, 0);
+	HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 
-  /* USER CODE BEGIN MX_GPIO_Init_2 */
+	/* USER CODE BEGIN MX_GPIO_Init_2 */
 
-  /* USER CODE END MX_GPIO_Init_2 */
+	/* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
-void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
-	if (GPIO_Pin == GPIO_PIN_13) {
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+	if (GPIO_Pin == GPIO_PIN_13)
+	{
 		BspButtonState = 1;
 	}
 }
-
 
 /* USER CODE END 4 */
 
@@ -714,7 +812,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
 /* USER CODE END Header_StartUROSTask */
 void StartUROSTask(void *argument)
 {
-  /* USER CODE BEGIN 5 */
+	/* USER CODE BEGIN 5 */
 
 	// micro-ROS configuration
 	/*
@@ -724,11 +822,12 @@ void StartUROSTask(void *argument)
 	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);
 
 	rmw_uros_set_custom_transport(
-	true, (void*) &huart2, cubemx_transport_open, cubemx_transport_close,
-			cubemx_transport_write, cubemx_transport_read);
+		true, (void *)&huart2, cubemx_transport_open, cubemx_transport_close,
+		cubemx_transport_write, cubemx_transport_read);
 
 	// Wait for micro-ROS Agent to start and be available
-	while (rmw_uros_ping_agent(1000, 1) != RCL_RET_OK) {
+	while (rmw_uros_ping_agent(1000, 1) != RCL_RET_OK)
+	{
 		vTaskDelay(pdMS_TO_TICKS(100));
 	}
 
@@ -737,77 +836,103 @@ void StartUROSTask(void *argument)
 	// Micro-ROS Setup
 	// ========================================================================================
 	rcl_allocator_t freeRTOS_allocator =
-			rcutils_get_zero_initialized_allocator();
+		rcutils_get_zero_initialized_allocator();
 	freeRTOS_allocator.allocate = microros_allocate;
 	freeRTOS_allocator.deallocate = microros_deallocate;
 	freeRTOS_allocator.reallocate = microros_reallocate;
 	freeRTOS_allocator.zero_allocate = microros_zero_allocate;
 
-	if (!rcutils_set_default_allocator(&freeRTOS_allocator)) {
+	if (!rcutils_set_default_allocator(&freeRTOS_allocator))
+	{
 		__BKPT(0);
-		while (1) {__NOP();}
+		while (1)
+		{
+			__NOP();
+		}
 	}
 
 	// micro-ROS app
 
 	allocator = rcl_get_default_allocator();
 
-	//create init_options
+	rcl_init_options_t init_options = rcl_get_zero_initialized_init_options();
+	rcl_init_options_init(&init_options, allocator);
+	rcl_init_options_set_domain_id(&init_options, 35);
 
+	rclc_support_init_with_options(&support, 0, NULL, &init_options, &allocator);
 
-	CHECK(rclc_support_init(&support, 0, NULL, &allocator));
-
+	// TODO change hardcoded names with a configurable name
 	char tmpbuff[150];
 	strcpy(tmpbuff, participant_name);
 
-	CHECK(rclc_node_init_default(&node,"veh_3_node", "", &support));
+	CHECK(rclc_node_init_default(&node, "veh_3_node", "", &support));
 	strcpy(tmpbuff, participant_name);
 
+	// PUBS ------------------------------------------------------------
+
 	CHECK(rclc_publisher_init_best_effort(&throttle_pub, &node,
-			ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
-			"veh_3/command/throttle"));
+										  ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
+										  "veh_3/command/throttle"));
 
 	strcpy(tmpbuff, participant_name);
 	CHECK(rclc_publisher_init_best_effort(&brake_pub, &node,
-			ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
-			"veh_3/command/brake"));
+										  ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
+										  "veh_3/command/brake"));
+
+	strcpy(tmpbuff, participant_name);
+	CHECK(rclc_publisher_init_best_effort(&braking_intent_pub, &node,
+										  ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
+										  "veh_3/command/desired_decel"));
+
+	CHECK(rclc_publisher_init_best_effort(&local_sp_pub, &node,
+									  ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
+									  "veh_3/state/local_setpoint"));
+	// SUBS -------------------------------------------------------------
 
 	strcpy(tmpbuff, participant_name);
 	CHECK(rclc_subscription_init_best_effort(&pv_sub, &node,
-			ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
-			"veh_3/state/speed"));
+											 ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
+											 "veh_3/state/speed"));
 
 	strcpy(tmpbuff, participant_name);
 	CHECK(rclc_subscription_init_best_effort(&r_sub, &node,
-			ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
-			"veh_3/state/setpoint"));
+											 ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
+											 "veh_3/state/setpoint"));
 
 	CHECK(rclc_subscription_init_best_effort(&plat_r_sub, &node,
-			ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
-			"platoon/plat_0/setpoint")); // TODO hardcoded platoon ID, must be changable later
+											 ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
+											 "platoon/plat_0/setpoint")); // TODO hardcoded platoon ID, must be changable later
 
 	strcpy(tmpbuff, participant_name);
 	CHECK(rclc_subscription_init_best_effort(&d_sub, &node,
-			ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
-			"veh_3/state/dist_to_veh"));
+											 ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
+											 "veh_3/state/dist_to_veh"));
 
 	CHECK(rclc_subscription_init_best_effort(&prec_v_sub, &node,
-			ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
-			"veh_2/state/speed"));
+											 ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
+											 "veh_2/state/speed"));
+
+	CHECK(rclc_subscription_init_best_effort(&prec_deccel_intent_sub, &node,
+											 ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
+											 "veh_2/state/desired_decel"));
+
+	// Executor init -------------------------------------------------------------
 
 	executor = rclc_executor_get_zero_initialized_executor();
-	CHECK(rclc_executor_init(&executor, &support.context, 8, &allocator));
+	CHECK(rclc_executor_init(&executor, &support.context, 9, &allocator));
 
 	CHECK(rclc_executor_add_subscription(&executor, &pv_sub, &pv_msg, &pv_sub_cb,
-			ON_NEW_DATA));
+										 ON_NEW_DATA));
 	CHECK(rclc_executor_add_subscription(&executor, &r_sub, &r_msg, &indiv_setpoint_sub_cb,
-			ON_NEW_DATA));
+										 ON_NEW_DATA));
 	CHECK(rclc_executor_add_subscription(&executor, &plat_r_sub, &plat_r_msg, &platoon_setpoint_sub_cb,
-			ON_NEW_DATA));
+										 ON_NEW_DATA));
 	CHECK(rclc_executor_add_subscription(&executor, &d_sub, &d_msg, &d_sub_cb,
-			ON_NEW_DATA));
+										 ON_NEW_DATA));
 	CHECK(rclc_executor_add_subscription(&executor, &prec_v_sub, &prec_v_msg, &prec_v_cb,
-			ON_NEW_DATA));
+										 ON_NEW_DATA));
+	CHECK(rclc_executor_add_subscription(&executor, &prec_deccel_intent_sub, &prec_deccel_intent_msg, &prec_braking_intent_cb,
+										 ON_NEW_DATA));
 
 	// Ensure XRCE session synchronized after creating entities
 	rmw_uros_sync_session(1000);
@@ -817,16 +942,19 @@ void StartUROSTask(void *argument)
 
 	// ======================================================================================
 
-	// Initialize messages explicitly
+	// Initialize messages explicitly, avoid starting with trash values
 	pv_msg.data = 0.0f;
 	r_msg.data = 0.0f;
 	plat_r_msg.data = 0.0f;
 	throttle_msg.data = 0.0f;
 	brake_msg.data = 0.0f;
+	local_sp_msg.data = 0.0f;
 
 	prec_v_msg.data = 0.0f;
+	prec_deccel_intent_msg.data = 0.0f;
+	braking_intent_msg.data = 0.0f;
 
-	// Initialize mailboxes to known values and mark them as fresh "now".
+	// Initialize mailboxes to known values and mark them as fresh 
 	TickType_t now = xTaskGetTickCount();
 	in_mb_write_begin();
 	g_in_mb.speed_mps = 0.0f;
@@ -834,75 +962,94 @@ void StartUROSTask(void *argument)
 	g_in_mb.indiv_setpoint_mps = 0.0f;
 	g_in_mb.platoon_setpoint_mps = 0.0f;
 	g_in_mb.preceding_speed_mps = 0.0f;
+	g_in_mb.preceding_braking_intent_mps2 = 0.0f;
+
 	g_in_mb.speed_tick = now;
 	g_in_mb.dist_tick = now;
 	g_in_mb.indiv_setpoint_tick = now;
 	g_in_mb.platoon_setpoint_tick = now;
 	g_in_mb.preceding_speed_tick = now;
+	g_in_mb.preceding_braking_intent_tick = now;
+
 	in_mb_write_end();
 
 	out_mb_write_begin();
 	g_out_mb.throttle = 0.0f;
 	g_out_mb.brake = 0.0f;
+	g_out_mb.braking_intent = 0.0f;
+	g_out_mb.local_sp = 0.0f;
 	g_out_mb.computed_tick = now;
 	out_mb_write_end();
 
-		// Low-latency executor spin; publish on-demand (event-driven).
-		const TickType_t spinPeriod = pdMS_TO_TICKS(1);
-		TickType_t lastWake = now;
+	const TickType_t spinPeriod = pdMS_TO_TICKS(1);
+	TickType_t lastWake = now;
 
 	uros_task_rdy = 1;
 
-	// Wait until the controller and platoon setup is finished
-	while (control_task_rdy != 1) {
+	while (control_task_rdy != 1)
+	{
 		vTaskDelay(spinPeriod);
 	}
 
-		for (;;) {
-			vTaskDelayUntil(&lastWake, spinPeriod);
+	for (;;)
+	{
+		vTaskDelayUntil(&lastWake, spinPeriod);
 		// DEBUG -----------------------------
+
 		TickType_t now_spin = xTaskGetTickCount();
 		static TickType_t prev_spin = 0;
 		g_dbg_uros_tick = now_spin;
 		g_dbg_uros_spin_period_ticks = (prev_spin == 0) ? 0 : (now_spin - prev_spin);
-		if (prev_spin != 0) {
+		if (prev_spin != 0)
+		{
 			TickType_t gap = now_spin - prev_spin;
-			if (gap > g_dbg_uros_spin_gap_max_ticks) g_dbg_uros_spin_gap_max_ticks = gap;
+			if (gap > g_dbg_uros_spin_gap_max_ticks)
+				g_dbg_uros_spin_gap_max_ticks = gap;
 		}
 		prev_spin = now_spin;
 		// -----------------------------------
 
-			rclc_executor_spin_some(&executor, 2);
+		rclc_executor_spin_some(&executor, 2);
 
-			// Publish immediately when ctrlTask has computed a new command.
-			uint32_t n = ulTaskNotifyTake(pdTRUE, 0);
-			if (n > 0) {
-				// publish only once with the latest values
-				while (ulTaskNotifyTake(pdTRUE, 0) > 0) {}
-
-				float throttle = 0.0f;
-				float brake = 0.0f;
-				(void) out_mb_read_snapshot(&throttle, &brake);
-				throttle_msg.data = throttle;
-				brake_msg.data = brake;
-
-				now = xTaskGetTickCount();
-				// DEBUG --------------------------
-				TickType_t now_pub = now;
-				g_dbg_uros_last_pub_tick = now_pub;
-				g_dbg_uros_publish_count++;
-
-				TickType_t age = now_pub - g_out_mb.computed_tick;
-				g_dbg_uros_cmd_age_ticks = age;
-				if (age < g_dbg_uros_cmd_age_min_ticks) g_dbg_uros_cmd_age_min_ticks = age;
-				if (age > g_dbg_uros_cmd_age_max_ticks) g_dbg_uros_cmd_age_max_ticks = age;
-				// -------------------------------
-
-				CHECK(rcl_publish(&throttle_pub, &throttle_msg, NULL));
-				CHECK(rcl_publish(&brake_pub, &brake_msg, NULL));
+		// Publish immediately when a command is computed in control task
+		uint32_t n = ulTaskNotifyTake(pdTRUE, 0);
+		if (n > 0)
+		{
+			while (ulTaskNotifyTake(pdTRUE, 0) > 0)
+			{
 			}
+
+			float throttle = 0.0f;
+			float brake = 0.0f;
+			float braking_intent = 0.0f;
+			float local_sp = 0.0f;
+			(void)out_mb_read_snapshot(&throttle, &brake, &braking_intent, &local_sp);
+			throttle_msg.data = throttle;
+			brake_msg.data = brake;
+			braking_intent_msg.data = braking_intent;
+			local_sp_msg.data = local_sp;
+
+			now = xTaskGetTickCount();
+			// DEBUG --------------------------
+			TickType_t now_pub = now;
+			g_dbg_uros_last_pub_tick = now_pub;
+			g_dbg_uros_publish_count++;
+
+			TickType_t age = now_pub - g_out_mb.computed_tick;
+			g_dbg_uros_cmd_age_ticks = age;
+			if (age < g_dbg_uros_cmd_age_min_ticks)
+				g_dbg_uros_cmd_age_min_ticks = age;
+			if (age > g_dbg_uros_cmd_age_max_ticks)
+				g_dbg_uros_cmd_age_max_ticks = age;
+			// -------------------------------
+
+			CHECK(rcl_publish(&throttle_pub, &throttle_msg, NULL));
+			CHECK(rcl_publish(&brake_pub, &brake_msg, NULL));
+			CHECK(rcl_publish(&braking_intent_pub, &braking_intent_msg, NULL));
+			CHECK(rcl_publish(&local_sp_pub, &local_sp_msg, NULL));
 		}
-  /* USER CODE END 5 */
+	}
+	/* USER CODE END 5 */
 }
 
 /* USER CODE BEGIN Header_StartCrtlTask */
@@ -914,58 +1061,16 @@ void StartUROSTask(void *argument)
 /* USER CODE END Header_StartCrtlTask */
 void StartCrtlTask(void *argument)
 {
-  /* USER CODE BEGIN StartCrtlTask */
-	// Setup Speed PID controller
-	// ===================================================================
-	pid_init(&speed_pid,
-	// Values from PSO optimization algorithm
-	// Hardcoding values is a lot easier than passing with micro-ROS,
-	// and frees up the ROS pub/sub ammount.
+	/* USER CODE BEGIN StartCrtlTask */
+	controller_params.coop_enable = (controller_params.platoon_index != 0);
+	if (vehicle_controller_init(&vehicle_controller, &controller_params) != VC_OK)
+	{
+		vTaskDelete(NULL);
+	}
 
-	// Low speed state is supposed, as all CARLA test start on stop state.
-			0.0f,
-			0.0f,
-			0.0f,
-			0.0f,				
-			0.01f				//	Ts
-			);
-	// Integral anti windup
-	pid_set_anti_windup(&speed_pid, _PID_ANTI_WINDUP_BACK_CALCULATION);
-	pid_set_kb_aw(&speed_pid, 1.0f);
-	// Controller clamping, positive should result in throttle
-	// negative in brake, though brake should be carefully
-	// calibrated, as PID wants to floor it.
-	pid_set_clamping(&speed_pid, 1.0f, -1.0f);
-	// Avoid huge jumps when setpoint changes suddenly
-	pid_set_derivative_on_meas(&speed_pid, _PID_DERIVATIVE_ON_MEASURE_ON);
-	// Set most appropriate discretization methods for each component
-	pid_set_derivative_discretization_method(&speed_pid, _PID_DISCRETE_TUSTIN);
-	pid_set_integral_discretization_method(&speed_pid,
-			_PID_DISCRETE_BACKWARD_EULER);
 
-	
-	// By default a low threshold is supposed, as all CARLA
-	// tests start at a stop state
-	set_gains_local(&speed_pid, &low_gains);
-
-	// ====================================================================
-
-	// Setup Platoon member handler
-	// ====================================================================
-	platoon_member.name = participant_name;
-	platoon_member.platoon_member_index = member_index;
-	platoon_member.is_platooning = in_platoon; 
-
-	platoon_member.k_dist = 5.0f; // Should match Python platoon members
-	platoon_member.k_vel = 1.5;
-	platoon_member.min_spacing = 7.5f;
-	platoon_member.time_headway = 0.3f;
-
-	platoon_member.get_controller_action = uros_get_controller_action;
-
-		// ====================================================================
-		const TickType_t ctrlPeriod = pdMS_TO_TICKS(10);
-		TickType_t lastCompute = xTaskGetTickCount();
+	const TickType_t ctrlPeriod = pdMS_TO_TICKS(10);
+	TickType_t lastCompute = xTaskGetTickCount();
 
 	const TickType_t speedStale = pdMS_TO_TICKS(50);
 	const TickType_t distStale = pdMS_TO_TICKS(100);
@@ -973,249 +1078,243 @@ void StartCrtlTask(void *argument)
 
 	float throttle_out = 0.0f;
 	float brake_out = 0.0f;
-
-	current_range = 0;
-	prev_range = 0;
+	float braking_intent_out = 0.0f;
+	float local_sp_out = 0.0f;
 
 	control_task_rdy = 1;
 
-	// Wait until uROS setup is done
-	while (uros_task_rdy != 1) {
+	while (uros_task_rdy != 1)
+	{
 		vTaskDelay(ctrlPeriod);
 	}
 
-			for (;;) {
-				// Lockstep: wait for a new speed sample (sim tick marker).
-				(void) ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-				// Coalesce bursts: if multiple samples arrived, run once with the latest mailbox values.
-				while (ulTaskNotifyTake(pdTRUE, 0) > 0) {}
+	for (;;)
+	{
+		// Wait for a new speed sample (sim tick marker).
+		(void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+		// Coalesce bursts: if multiple samples arrived, run once with the latest mailbox values.
+		while (ulTaskNotifyTake(pdTRUE, 0) > 0)
+		{
+		}
 
-				// 100 Hz ceiling (wall-clock): if samples arrive faster than 10ms, delay.
-				TickType_t now_ctrl = xTaskGetTickCount();
-				TickType_t elapsed = now_ctrl - lastCompute;
-				if (elapsed < ctrlPeriod) {
-					vTaskDelay(ctrlPeriod - elapsed);
-					now_ctrl = xTaskGetTickCount();
-				}
+		// 100 Hz ceiling (wall-clock): if samples arrive faster than 10ms, delay.
+		TickType_t now_ctrl = xTaskGetTickCount();
+		TickType_t elapsed = now_ctrl - lastCompute;
+		if (elapsed < ctrlPeriod)
+		{
+			vTaskDelay(ctrlPeriod - elapsed);
+			now_ctrl = xTaskGetTickCount();
+		}
 
-				// DEBUG -------------------------------
-				static TickType_t prev_ctrl = 0;
-				g_dbg_ctrl_tick = now_ctrl;
-				g_dbg_ctrl_period_ticks = (prev_ctrl == 0) ? 0 : (now_ctrl - prev_ctrl);
-				prev_ctrl = now_ctrl;
-				// --------------------------------------
+		// DEBUG -------------------------------
+		static TickType_t prev_ctrl = 0;
+		g_dbg_ctrl_tick = now_ctrl;
+		g_dbg_ctrl_period_ticks = (prev_ctrl == 0) ? 0 : (now_ctrl - prev_ctrl);
+		prev_ctrl = now_ctrl;
+		// --------------------------------------
 
-			// DEBUG -------------------------------
-			// Compute callback Hz over a 1-second window (1kHz tick => 1000 ticks).
-			// Values are written to g_dbg_*_hz_1s for Live Expressions.
-			static uint32_t prev_speed_cb_total = 0;
-			static uint32_t prev_dist_cb_total = 0;
-			static uint32_t prev_platoon_sp_cb_total = 0;
+		// DEBUG -------------------------------
+		// Compute callback Hz over a 1-second window (1kHz tick => 1000 ticks).
+		// Values are written to g_dbg_*_hz_1s for Live Expressions.
+		static uint32_t prev_speed_cb_total = 0;
+		static uint32_t prev_dist_cb_total = 0;
+		static uint32_t prev_platoon_sp_cb_total = 0;
 
-			if (g_dbg_hz_window_start_tick == 0) {
-				g_dbg_hz_window_start_tick = now_ctrl;
-				prev_speed_cb_total = g_dbg_speed_cb_count_total;
-				prev_dist_cb_total = g_dbg_dist_cb_count_total;
-				prev_platoon_sp_cb_total = g_dbg_platoon_sp_cb_count_total;
+		if (g_dbg_hz_window_start_tick == 0)
+		{
+			g_dbg_hz_window_start_tick = now_ctrl;
+			prev_speed_cb_total = g_dbg_speed_cb_count_total;
+			prev_dist_cb_total = g_dbg_dist_cb_count_total;
+			prev_platoon_sp_cb_total = g_dbg_platoon_sp_cb_count_total;
+		}
+
+		if ((TickType_t)(now_ctrl - g_dbg_hz_window_start_tick) >= pdMS_TO_TICKS(1000))
+		{
+			g_dbg_speed_hz_1s = g_dbg_speed_cb_count_total - prev_speed_cb_total;
+			g_dbg_dist_hz_1s = g_dbg_dist_cb_count_total - prev_dist_cb_total;
+			g_dbg_platoon_sp_hz_1s = g_dbg_platoon_sp_cb_count_total - prev_platoon_sp_cb_total;
+
+			prev_speed_cb_total = g_dbg_speed_cb_count_total;
+			prev_dist_cb_total = g_dbg_dist_cb_count_total;
+			prev_platoon_sp_cb_total = g_dbg_platoon_sp_cb_count_total;
+			g_dbg_hz_window_start_tick += pdMS_TO_TICKS(1000);
+		}
+		// --------------------------------------
+
+		ctrl_inputs_snapshot_t in = {0};
+		TickType_t speed_tick = 0;
+		TickType_t dist_tick = 0;
+		TickType_t indiv_sp_tick = 0;
+		TickType_t platoon_sp_tick = 0;
+		TickType_t preceding_speed_tick = 0;
+		TickType_t preceding_braking_intent_tick = 0;
+		(void)in_mb_read_snapshot(&in, &speed_tick, &dist_tick, &indiv_sp_tick,
+								  &platoon_sp_tick, &preceding_speed_tick, &preceding_braking_intent_tick);
+
+		// Wait briefly for distance (and platoon setpoint) to catch up to this tick.
+		// On USB-CDC/micro-ROS, topics can be delivered/processed skewed; stepping on fresh speed
+		// but stale distance causes late braking. This bounded wait reduces that skew without
+		// requiring stamped/sequence messages.
+		const TickType_t dist_gate_max_wait = pdMS_TO_TICKS(10);
+		const TickType_t dist_gate_step = pdMS_TO_TICKS(1);
+		const TickType_t dist_gate_target_age = pdMS_TO_TICKS(2);
+		const TickType_t sp_gate_target_age = pdMS_TO_TICKS(5);
+		TickType_t dist_tick_0 = dist_tick;
+		TickType_t platoon_sp_tick_0 = platoon_sp_tick;
+		TickType_t preceding_speed_tick_0 = preceding_speed_tick;
+		TickType_t preceding_braking_intent_tick_0 = preceding_braking_intent_tick;
+
+		for (TickType_t waited = 0; waited < dist_gate_max_wait; waited += dist_gate_step)
+		{
+			TickType_t dist_age = now_ctrl - dist_tick;
+			TickType_t sp_age = now_ctrl - platoon_sp_tick;
+
+			// Prefer: get a newer distance sample; also try to keep platoon SP reasonably fresh.
+			if ((dist_age <= dist_gate_target_age && sp_age <= sp_gate_target_age) || (dist_tick != dist_tick_0 && platoon_sp_tick != platoon_sp_tick_0) || (dist_tick != dist_tick_0 && dist_age <= pdMS_TO_TICKS(5)))
+			{
+				break;
 			}
 
-			if ((TickType_t)(now_ctrl - g_dbg_hz_window_start_tick) >= pdMS_TO_TICKS(1000)) {
-				g_dbg_speed_hz_1s = g_dbg_speed_cb_count_total - prev_speed_cb_total;
-				g_dbg_dist_hz_1s = g_dbg_dist_cb_count_total - prev_dist_cb_total;
-				g_dbg_platoon_sp_hz_1s = g_dbg_platoon_sp_cb_count_total - prev_platoon_sp_cb_total;
+			vTaskDelay(dist_gate_step);
+			now_ctrl = xTaskGetTickCount();
+			(void)in_mb_read_snapshot(&in, &speed_tick, &dist_tick, &indiv_sp_tick,
+									  &platoon_sp_tick, &preceding_speed_tick, &preceding_braking_intent_tick);
+		}
 
-				prev_speed_cb_total = g_dbg_speed_cb_count_total;
-				prev_dist_cb_total = g_dbg_dist_cb_count_total;
-				prev_platoon_sp_cb_total = g_dbg_platoon_sp_cb_count_total;
-				g_dbg_hz_window_start_tick += pdMS_TO_TICKS(1000);
-			}
-			// --------------------------------------
+		// DEBUG -------------------------------
+		g_dbg_ctrl_speed_age_ticks = now_ctrl - speed_tick;
+		g_dbg_ctrl_dist_age_ticks = now_ctrl - dist_tick;
+		g_dbg_ctrl_platoon_sp_age_ticks = now_ctrl - platoon_sp_tick;
 
+		if (g_dbg_ctrl_speed_age_ticks > g_dbg_ctrl_speed_age_ticks_max)
+			g_dbg_ctrl_speed_age_ticks_max = g_dbg_ctrl_speed_age_ticks;
+		if (g_dbg_ctrl_speed_age_ticks < g_dbg_ctrl_speed_age_ticks_min)
+			g_dbg_ctrl_speed_age_ticks_min = g_dbg_ctrl_speed_age_ticks;
 
-			PLATOON_inputs_t in = { 0 };
-			TickType_t speed_tick = 0;
-			TickType_t dist_tick = 0;
-			TickType_t indiv_sp_tick = 0;
-			TickType_t platoon_sp_tick = 0;
-			TickType_t preceding_speed_tick = 0;
-			(void) in_mb_read_snapshot(&in, &speed_tick, &dist_tick, &indiv_sp_tick,
-					&platoon_sp_tick, &preceding_speed_tick);
+		if (g_dbg_ctrl_dist_age_ticks > g_dbg_ctrl_dist_age_ticks_max)
+			g_dbg_ctrl_dist_age_ticks_max = g_dbg_ctrl_dist_age_ticks;
+		if (g_dbg_ctrl_dist_age_ticks < g_dbg_ctrl_dist_age_ticks_min)
+			g_dbg_ctrl_dist_age_ticks_min = g_dbg_ctrl_dist_age_ticks;
 
-			// Wait briefly for distance (and platoon setpoint) to catch up to this tick.
-			// On USB-CDC/micro-ROS, topics can be delivered/processed skewed; stepping on fresh speed
-			// but stale distance causes late braking. This bounded wait reduces that skew without
-			// requiring stamped/sequence messages.
-			const TickType_t dist_gate_max_wait = pdMS_TO_TICKS(10);
-			const TickType_t dist_gate_step = pdMS_TO_TICKS(1);
-			const TickType_t dist_gate_target_age = pdMS_TO_TICKS(2);
-			const TickType_t sp_gate_target_age = pdMS_TO_TICKS(5);
-			TickType_t dist_tick_0 = dist_tick;
-			TickType_t platoon_sp_tick_0 = platoon_sp_tick;
-			TickType_t preceding_speed_tick_0 = preceding_speed_tick;
-
-			for (TickType_t waited = 0; waited < dist_gate_max_wait; waited += dist_gate_step) {
-				TickType_t dist_age = now_ctrl - dist_tick;
-				TickType_t sp_age = now_ctrl - platoon_sp_tick;
-
-				// Prefer: get a newer distance sample; also try to keep platoon SP reasonably fresh.
-				if ((dist_age <= dist_gate_target_age && sp_age <= sp_gate_target_age)
-						|| (dist_tick != dist_tick_0 && platoon_sp_tick != platoon_sp_tick_0)
-						|| (dist_tick != dist_tick_0 && dist_age <= pdMS_TO_TICKS(5))) {
-					break;
-				}
-
-				vTaskDelay(dist_gate_step);
-				now_ctrl = xTaskGetTickCount();
-				(void) in_mb_read_snapshot(&in, &speed_tick, &dist_tick, &indiv_sp_tick,
-						&platoon_sp_tick, &preceding_speed_tick);
-			}
-
-			// DEBUG -------------------------------
-			g_dbg_ctrl_speed_age_ticks = now_ctrl - speed_tick;
-			g_dbg_ctrl_dist_age_ticks = now_ctrl - dist_tick;
-			g_dbg_ctrl_platoon_sp_age_ticks = now_ctrl - platoon_sp_tick;
-
-		if ( g_dbg_ctrl_speed_age_ticks > g_dbg_ctrl_speed_age_ticks_max ) g_dbg_ctrl_speed_age_ticks_max = g_dbg_ctrl_speed_age_ticks;
-		if ( g_dbg_ctrl_speed_age_ticks < g_dbg_ctrl_speed_age_ticks_min ) g_dbg_ctrl_speed_age_ticks_min = g_dbg_ctrl_speed_age_ticks;
-
-		if ( g_dbg_ctrl_dist_age_ticks > g_dbg_ctrl_dist_age_ticks_max ) g_dbg_ctrl_dist_age_ticks_max = g_dbg_ctrl_dist_age_ticks;
-		if ( g_dbg_ctrl_dist_age_ticks < g_dbg_ctrl_dist_age_ticks_min ) g_dbg_ctrl_dist_age_ticks_min = g_dbg_ctrl_dist_age_ticks;
-		
-		if ( g_dbg_ctrl_platoon_sp_age_ticks > g_dbg_ctrl_platoon_sp_age_ticks_max ) g_dbg_ctrl_platoon_sp_age_ticks_max = g_dbg_ctrl_platoon_sp_age_ticks;
-		if ( g_dbg_ctrl_platoon_sp_age_ticks < g_dbg_ctrl_platoon_sp_age_ticks_min ) g_dbg_ctrl_platoon_sp_age_ticks_min = g_dbg_ctrl_platoon_sp_age_ticks;
+		if (g_dbg_ctrl_platoon_sp_age_ticks > g_dbg_ctrl_platoon_sp_age_ticks_max)
+			g_dbg_ctrl_platoon_sp_age_ticks_max = g_dbg_ctrl_platoon_sp_age_ticks;
+		if (g_dbg_ctrl_platoon_sp_age_ticks < g_dbg_ctrl_platoon_sp_age_ticks_min)
+			g_dbg_ctrl_platoon_sp_age_ticks_min = g_dbg_ctrl_platoon_sp_age_ticks;
 		//--------------------------------------
 
-			TickType_t now = now_ctrl;
-			bool speed_ok = ((TickType_t) (now - speed_tick) <= speedStale);
-			bool dist_ok = ((TickType_t) (now - dist_tick) <= distStale);
+		TickType_t now = now_ctrl;
+		bool speed_ok = ((TickType_t)(now - speed_tick) <= speedStale);
+		bool dist_ok = ((TickType_t)(now - dist_tick) <= distStale);
 
-			if (!dist_ok) {
-				// Conservative fallback: if distance is stale, assume a very small gap to bias braking
-				// instead of disabling spacing logic entirely.
-				in.distance_to_front_m = 0.1f;
-			}
+		if (!dist_ok)
+		{
+			in.distance_to_front_m = 0.1f;
+		}
 
-		if (speed_ok) {
+		if (speed_ok)
+		{
+			vehicle_controller_inputs_t vc_in = {0};
+			vc_in.speed_mps = in.speed_mps;
+			vc_in.distance_to_front_m = in.distance_to_front_m;
+			vc_in.indiv_setpoint_mps = in.indiv_setpoint_mps;
+			vc_in.platoon_setpoint_mps = in.platoon_setpoint_mps;
+			vc_in.platoon_enabled = platoon_enabled;
+			vc_in.preceding_speed_mps = in.preceding_speed_mps;
+			vc_in.preceding_desired_decel_mps2 = in.preceding_braking_intent_mps2;
+			vc_in.preceding_desired_decel_rx_tick = (VC_Tick_t)preceding_braking_intent_tick;
+			vc_in.preceding_desired_decel_valid = (g_have_preceding_braking_intent != 0);
 
-			prev_range = current_range;
-			// Update current range depending on speed +- histeresis
-			// Only reset pid state when changing PID
+			vehicle_controller_outputs_t vc_out = {0};
+			(void)vehicle_controller_step((vehicle_controller_t *)&vehicle_controller,
+									 &controller_params,
+									 &vc_in,
+									 (VC_Tick_t)now,
+									 &vc_out);
 
-			// TODO		Make current_range work as an index,instead of switch-case
-			switch (current_range)
-			{
-			case 0:
-				if (in.speed_mps > ( thresh_low_mid + hist )) current_range = 1;
-				break;
-			case 1:
-				if (in.speed_mps > (thresh_mid_high + hist)) { current_range = 2; } 
-				else if (in.speed_mps < thresh_low_mid - hist) { current_range = 0; }
-				break;
-			case 2:
-				if (in.speed_mps < (thresh_mid_high - hist)) current_range = 1;
-				break;
-			default:
-				break;
-			}
-
-			// Change PID gains to corresponding range
-			// TODO 	Change so that current_range acts as an index
-			//	on an array of PID gains
-			if (current_range != prev_range){
-				switch (current_range)
-				{
-					case 0:
-						set_gains_local(&speed_pid, &low_gains);
-						break;
-					case 1:	
-						set_gains_local(&speed_pid, &mid_gains);
-						break;
-					case 2:
-						set_gains_local(&speed_pid, &high_gains);
-						break;
-					default:
-						break;
-				}
-			}
-
-
-			PLATOON_command_t cmd = compute_control(&platoon_member, &in);
-			// DEBUG ---------------------------
 			g_dbg_ctrl_compute_count++;
-			// ---------------------------------
-			throttle_out = cmd.throttle_cmd;
-			brake_out = cmd.brake_cmd;
-		} else {
+			throttle_out = vc_out.throttle_cmd;
+			brake_out = vc_out.brake_cmd;
+			braking_intent_out = vc_out.desired_decel_mps2;
+			local_sp_out = vc_out.effective_speed_sp_mps;
+		}
+		else
+		{
 			// Very simple freshness policy: if speed is stale, ramp actuator outputs to zero
 			// if, for some reason, data read fails repeatedly.
 			throttle_out = ramp_towards_zero(throttle_out, rampStep);
 			brake_out = ramp_towards_zero(brake_out, rampStep);
+			braking_intent_out = ramp_towards_zero(braking_intent_out, rampStep);
+			local_sp_out = ramp_towards_zero(local_sp_out, rampStep);
 		}
 
-			out_mb_write_begin();
-			g_out_mb.throttle = throttle_out;
-			g_out_mb.brake = brake_out;
-			g_out_mb.computed_tick = now;
-			out_mb_write_end();
+		out_mb_write_begin();
+		g_out_mb.throttle = throttle_out;
+		g_out_mb.brake = brake_out;
+		g_out_mb.braking_intent = braking_intent_out;
+		g_out_mb.local_sp = local_sp_out;
+		g_out_mb.computed_tick = now;
+		out_mb_write_end();
 
-			// Notify uROS task to publish new command immediately.
-			if (uROSTaskHandle != NULL) {
-				xTaskNotifyGive((TaskHandle_t) uROSTaskHandle);
-			}
-
-			lastCompute = now_ctrl;
+		// Notify uROS task to publish new command immediately.
+		if (uROSTaskHandle != NULL)
+		{
+			xTaskNotifyGive((TaskHandle_t)uROSTaskHandle);
 		}
-  /* USER CODE END StartCrtlTask */
+
+		lastCompute = now_ctrl;
+	}
+	/* USER CODE END StartCrtlTask */
 }
 
 /**
-  * @brief  Period elapsed callback in non blocking mode
-  * @note   This function is called  when TIM1 interrupt took place, inside
-  * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
-  * a global variable "uwTick" used as application time base.
-  * @param  htim : TIM handle
-  * @retval None
-  */
+ * @brief  Period elapsed callback in non blocking mode
+ * @note   This function is called  when TIM1 interrupt took place, inside
+ * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
+ * a global variable "uwTick" used as application time base.
+ * @param  htim : TIM handle
+ * @retval None
+ */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
-  /* USER CODE BEGIN Callback 0 */
+	/* USER CODE BEGIN Callback 0 */
 
-  /* USER CODE END Callback 0 */
-  if (htim->Instance == TIM1)
-  {
-    HAL_IncTick();
-  }
-  /* USER CODE BEGIN Callback 1 */
+	/* USER CODE END Callback 0 */
+	if (htim->Instance == TIM1)
+	{
+		HAL_IncTick();
+	}
+	/* USER CODE BEGIN Callback 1 */
 
-  /* USER CODE END Callback 1 */
+	/* USER CODE END Callback 1 */
 }
 
 /**
-  * @brief  This function is executed in case of error occurrence.
-  * @retval None
-  */
+ * @brief  This function is executed in case of error occurrence.
+ * @retval None
+ */
 void Error_Handler(void)
 {
-  /* USER CODE BEGIN Error_Handler_Debug */
+	/* USER CODE BEGIN Error_Handler_Debug */
 	/* User can add his own implementation to report the HAL error return state */
 	__disable_irq();
-	while (1) {
+	while (1)
+	{
 	}
-  /* USER CODE END Error_Handler_Debug */
+	/* USER CODE END Error_Handler_Debug */
 }
 #ifdef USE_FULL_ASSERT
 /**
-  * @brief  Reports the name of the source file and the source line number
-  *         where the assert_param error has occurred.
-  * @param  file: pointer to the source file name
-  * @param  line: assert_param error line source number
-  * @retval None
-  */
+ * @brief  Reports the name of the source file and the source line number
+ *         where the assert_param error has occurred.
+ * @param  file: pointer to the source file name
+ * @param  line: assert_param error line source number
+ * @retval None
+ */
 void assert_failed(uint8_t *file, uint32_t line)
 {
-  /* USER CODE BEGIN 6 */
-  /* User can add his own implementation to report the file name and line number,
-     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
-  /* USER CODE END 6 */
+	/* USER CODE BEGIN 6 */
+	/* User can add his own implementation to report the file name and line number,
+	   ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+	/* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */

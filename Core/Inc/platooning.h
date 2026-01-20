@@ -21,12 +21,16 @@ typedef struct {
 	float indiv_setpoint_mps;
 	float platoon_setpoint_mps;
 	float preceding_speed_mps;
+	float preceding_braking_intent_mps2;
 } PLATOON_inputs_t;
 
 typedef struct {
 	float throttle_cmd;
 	float brake_cmd;
+	float brake_intend_cmd;
 } PLATOON_command_t;
+
+
 
 typedef struct {
 

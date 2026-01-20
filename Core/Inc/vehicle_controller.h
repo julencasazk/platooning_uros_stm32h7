@@ -1,0 +1,171 @@
+#ifndef __VEHICLE_CONTROLLER_H__
+#define __VEHICLE_CONTROLLER_H__
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include <stdbool.h>
+#include <stdint.h>
+
+#include <pid_stm32.h>
+
+typedef uint32_t VC_Tick_t;
+
+
+typedef enum {
+    VC_OK = 0,
+    VC_ERR = 1,
+    VC_ERR_NULL_PARAM = 2,
+    VC_ERR_BAD_PARAM = 3,
+    VC_ERR_PIDLIB = 4,
+
+} VC_Err_t;
+
+typedef enum {
+   VC_SPEED_RANGE_LOW = 0,
+   VC_SPEED_RANGE_MID = 1,
+   VC_SPEED_RANGE_HIGH = 2,
+} VC_SpeedRange_t;
+
+typedef struct {
+   float kp;
+   float ki;
+   float kd;
+   float n;
+} VC_PIDGains_t;
+
+// Braking linear mapping, corresponds to data from CARLA brake testing.
+// Maps a mps2 deccel value to a corresponding brake value [0,1]
+typedef struct {
+   float min_decel;
+   float max_decel;
+   float min_brake;
+   float max_brake;
+} VC_BrakeMap_t;
+
+typedef struct {
+   // Platoon position
+   uint8_t platoon_index; // 0 = leader
+
+   // Spacing and setpoint correction
+   float desired_time_headway_s;
+   float min_spacing_m;
+   float k_dist;
+   float k_vel;
+   float speed_sp_min_mps;
+   float speed_sp_max_mps;
+
+   // Speed range scheduling
+   float v1_mps;
+   float v2_mps;
+   float hysteresis_mps;
+   VC_PIDGains_t gains_low;
+   VC_PIDGains_t gains_mid;
+   VC_PIDGains_t gains_high;
+
+   // PID configuration
+   float pid_ts_s; // Sample time used to tune the PID controller
+                    // for CARLA testing was 0.01s 
+
+   // Brake supervisor config
+   bool brake_enable;
+   float brake_deadband;
+   float brake_rate_limit_per_s; // brake units per second
+   float k_brake;                // global gain on brake mapping
+
+   VC_BrakeMap_t brake_map_low;
+   VC_BrakeMap_t brake_map_mid;
+   VC_BrakeMap_t brake_map_high;
+
+   // Brake gates / hysteresis
+   float dist_on_m;
+   float dist_off_m;
+   float ttc_on_s;
+   float ttc_off_s;
+   float v_margin_on_mps;
+   float v_margin_off_mps;
+
+   // Decel targets in mps2 
+   float decel_mild;
+   float decel_mod;
+   float decel_full;
+
+   // Cooperative braking intent
+   bool coop_enable;
+   float coop_timeout_s;
+   float coop_gain;
+   float coop_decel_on;
+   float coop_decel_off;
+
+   // Time base
+   uint32_t tick_hz; // Should match FreeRTOS control task tickrate 
+} vehicle_controller_params_t;
+
+typedef struct {
+   // Speed PID controller state
+   pid_controller_t speed_pid;
+   VC_SpeedRange_t current_range;
+
+   // Brake supervisor state
+   bool brake_active;
+   float brake_cmd_prev;
+   float desired_decel_mps2; // last computed desired decel magnitude
+   bool ff_active; // Needed to latch if vehicle is following intent
+
+   // Cooperative braking message freshness
+   VC_Tick_t preceding_decel_last_rx_tick;
+   bool preceding_decel_have_rx_tick;
+
+   // Timing
+   VC_Tick_t last_step_tick;
+   bool have_last_step_tick;
+} vehicle_controller_t;
+
+typedef struct {
+   // Inputs (latest sample) 
+   float speed_mps;
+   float indiv_setpoint_mps;
+   float platoon_setpoint_mps;
+   bool platoon_enabled;
+
+   float distance_to_front_m; // <= 0 means invalid
+   float preceding_speed_mps; // 0 if not available
+
+   // Cooperative braking intent from predecessor
+   // Each vehicle reads the intent of the vehicle ahead
+   // and applies its own brake, passing the desire to the
+   // one after
+   float preceding_desired_decel_mps2;
+   VC_Tick_t preceding_desired_decel_rx_tick;
+   bool preceding_desired_decel_valid;
+} vehicle_controller_inputs_t;
+
+typedef struct {
+   // Outputs
+   float throttle_cmd;          // [0..1]
+   float brake_cmd;             // [0..1]
+   float desired_decel_mps2;    
+   float effective_speed_sp_mps;
+} vehicle_controller_outputs_t;
+
+// Initializes a vehicle controller and params, also does sanity checks
+VC_Err_t vehicle_controller_init(vehicle_controller_t *ctrl,
+      const vehicle_controller_params_t *params);
+
+// Performs a single step of the vehicle controller, computes throttle
+// and brake values depending on current vehicle state.
+//
+// vehicle_controller_init() should be called before this to make
+// sure the controller is correctly initialized
+VC_Err_t vehicle_controller_step(vehicle_controller_t *ctrl,
+      const vehicle_controller_params_t *params,
+      const vehicle_controller_inputs_t *in,
+      VC_Tick_t now_tick,
+      vehicle_controller_outputs_t *out);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // __VEHICLE_CONTROLLER_H__

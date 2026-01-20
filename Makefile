@@ -212,6 +212,7 @@ print_cflags:
 C_INCLUDES += -ILib/pid_stm32/inc
 
 C_SOURCES += Core/Src/platooning.c
+C_SOURCES += Core/Src/vehicle_controller.c
 C_SOURCES += Lib/pid_stm32/src/pid_stm32.c
 
 #######################################
