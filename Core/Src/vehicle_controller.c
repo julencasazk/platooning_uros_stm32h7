@@ -76,7 +76,7 @@ VC_Err_t vehicle_controller_init(vehicle_controller_t *ctrl,
     piderr = pid_set_discretization_method(pidptr, _PID_DISCRETE_TUSTIN);
     if (piderr != _PID_OK)
         return VC_ERR_PIDLIB;
-    piderr = pid_set_clamping(pidptr, 1.0f, 0.0f);
+    piderr = pid_set_clamping(pidptr, 1.0f, -1.0f);
     if (piderr != _PID_OK)
         return VC_ERR_PIDLIB;
 
@@ -209,6 +209,10 @@ VC_Err_t vehicle_controller_step(vehicle_controller_t *ctrl,
     }
 
     throttle = (float)pid_run(&(ctrl->speed_pid), base_sp, in->speed_mps);
+    if (throttle < 0.0f)
+        throttle = 0.0f;
+    else if (throttle > 1.0f)
+        throttle = 1.0f;
     // =======================================================================
 
     // BRAKE COMPUTING
@@ -287,7 +291,7 @@ VC_Err_t vehicle_controller_step(vehicle_controller_t *ctrl,
             // - Mild: Only overspeeding
             // - Moderate: closing in or too close
             // - Full: TTC very low, collission imminent
-            if (too_close_on && ttc_on)
+            if (too_close_on || ttc_on)
             {
                 if (ttc < 1.2f || dist_error < -2.0f)
                 {
@@ -322,7 +326,11 @@ VC_Err_t vehicle_controller_step(vehicle_controller_t *ctrl,
                 break;
             }
 
-            if (desired_decel <= brakemap.min_decel)
+            if (desired_decel <= 0.0f)
+            {
+                brake = 0.0f;
+            }
+            else if (desired_decel <= brakemap.min_decel)
             {
                 brake = brakemap.min_brake;
             }
