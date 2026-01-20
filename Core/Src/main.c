@@ -203,6 +203,8 @@ volatile TickType_t g_dbg_ctrl_tick = 0;
 volatile TickType_t g_dbg_uros_tick = 0;
 
 volatile TickType_t g_dbg_ctrl_period_ticks = 0;
+volatile TickType_t g_dbg_ctrl_period_ticks_max = 0;
+volatile TickType_t g_dbg_ctrl_period_ticks_min = 0xFFFFFFFFu;
 volatile TickType_t g_dbg_uros_spin_period_ticks = 0;
 // DEBUG ----- max gap between executor spins (ticks; 1 tick ~= 1ms at 1kHz)
 volatile TickType_t g_dbg_uros_spin_gap_max_ticks = 0;
@@ -882,7 +884,7 @@ void StartUROSTask(void *argument)
 	strcpy(tmpbuff, participant_name);
 	CHECK(rclc_publisher_init_best_effort(&braking_intent_pub, &node,
 										  ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
-										  "veh_3/command/desired_decel"));
+										  "veh_3/state/desired_decel"));
 
 	CHECK(rclc_publisher_init_best_effort(&local_sp_pub, &node,
 									  ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
@@ -1110,6 +1112,8 @@ void StartCrtlTask(void *argument)
 		static TickType_t prev_ctrl = 0;
 		g_dbg_ctrl_tick = now_ctrl;
 		g_dbg_ctrl_period_ticks = (prev_ctrl == 0) ? 0 : (now_ctrl - prev_ctrl);
+		if (g_dbg_ctrl_period_ticks > g_dbg_ctrl_period_ticks_max) g_dbg_ctrl_period_ticks_max = g_dbg_ctrl_period_ticks;
+		if (g_dbg_ctrl_period_ticks < g_dbg_ctrl_period_ticks_min) g_dbg_ctrl_period_ticks_min = g_dbg_ctrl_period_ticks;
 		prev_ctrl = now_ctrl;
 		// --------------------------------------
 
