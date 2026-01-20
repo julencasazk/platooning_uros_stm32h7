@@ -1,0 +1,9 @@
+repositories:
+  control_msgs:
+    type: git
+    url: https://github.com/ros-controls/control_msgs
+    version: master
+  etsi_its_lite_msgs:
+    type: git
+    url: https://github.com/julencasazk/etsi_its_lite_msgs
+    version: main

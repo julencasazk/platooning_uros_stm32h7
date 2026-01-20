@@ -17,18 +17,19 @@ It can act both as a follower or a leader.
 git clone --recurse-submodules https://github.com/julencasazk/platooning_uros_stm32h7.git
 ```
 
-2. From the project's root dir, clone the PID message repo from [here](https://github.com/julencasazk/pid_msg)
+2. Replace the contents of the microros_static_library extra packages repository list:
 ```
-git clone https://github.com/julencasazk/pid_gains_msg.git micro_ros_stm32cubemx_utils/microros_static_library/library_generation/extra_packages/pid_gains_message
+cat extra_packages.repos > micro_ros_stm32cubemx_utils/microros_static_library/library_generation/extra_packages/extra_packages.repos
+cat extra_packages.repos > micro_ros_stm32cubemx_utils/microros_static_library_ide/library_generation/extra_packages/extra_packages.repos
 ```
 
 3. Pull the official micro-ROS static library builder from Docker hub
 ```
-docker pull microros/micro_ros_static_library_builder:humble
+sudo docker pull microros/micro_ros_static_library_builder:humble
 ```
 4. Run it from the project's root directory 
 ```
-docker run -it --rm -v $(pwd):/project --env MICROROS_LIBRARY_FOLDER=micro_ros_stm32cubemx_utils/microros_static_library microros/micro_ros_static_library_builder:humble
+sudo docker run -it --rm -v $(pwd):/project --env MICROROS_LIBRARY_FOLDER=micro_ros_stm32cubemx_utils/microros_static_library microros/micro_ros_static_library_builder:humble
 ```
 You might need to use `sudo` depending on how your Docker is set up.
 
