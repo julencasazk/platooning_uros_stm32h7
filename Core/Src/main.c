@@ -31,6 +31,7 @@
 #include <rmw_microros/rmw_microros.h>
 
 #include <std_msgs/msg/float32.h>
+#include <etsi_its_lite_msgs/msg/cam.h>
 // #include <sts_msgs/msg/bool.h>
 
 #include <stdbool.h>
@@ -105,6 +106,8 @@ const osThreadAttr_t ctrlTask_attributes = {
 	.priority = (osPriority_t)osPriorityBelowNormal7,
 };
 /* USER CODE BEGIN PV */
+
+
 
 // New vehicle controller and params
 // ==============================================
@@ -842,7 +845,7 @@ void StartUROSTask(void *argument)
 
 	if (!rcutils_set_default_allocator(&freeRTOS_allocator))
 	{
-		__BKPT(0);
+		__BKPT(0); // Stop to check if allocator not set correctly
 		while (1)
 		{
 			__NOP();
