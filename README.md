@@ -21,6 +21,7 @@ git clone --recurse-submodules https://github.com/julencasazk/platooning_uros_st
 ```
 cat extra_packages.repos > micro_ros_stm32cubemx_utils/microros_static_library/library_generation/extra_packages/extra_packages.repos
 cat extra_packages.repos > micro_ros_stm32cubemx_utils/microros_static_library_ide/library_generation/extra_packages/extra_packages.repos
+cat colcon.meta > micro_ros_stm32cubemx_utils/microros_static_library/library_generation/colcon.meta
 ```
 
 3. Pull the official micro-ROS static library builder from Docker hub

@@ -84,9 +84,6 @@ typedef struct {
 
    // Brake supervisor config
    bool brake_enable;
-   // If > 0, brake mapping logic is only allowed when distance_to_front_m <= this.
-   // Outside this range the controller falls back to the signed PID (throttle/brake).
-   float brake_map_max_dist_m;
    float brake_deadband;
    float brake_rate_limit_per_s; // brake units per second
    float k_brake;                // global gain on brake mapping

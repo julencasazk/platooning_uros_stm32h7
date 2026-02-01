@@ -1,0 +1,275 @@
+#include "vehicle_controller.h"
+#include <stddef.h>
+#include <stdio.h>
+#include <string.h>
+#include <math.h>
+
+
+VC_Err_t vehicle_controller_init(vehicle_controller_t *ctrl,
+                                 const vehicle_controller_params_t *params)
+{
+    // Input Sanitizing
+    // =============================================================
+    if (ctrl == NULL || params == NULL)
+        return VC_ERR_NULL_PARAM;
+    if (
+        params->pid_ts_s <= 0.0f ||
+        params->speed_sp_min_mps > params->speed_sp_max_mps ||
+        params->v1_mps >= params->v2_mps ||
+        params->hysteresis_mps <= 0.0f)
+        return VC_ERR_BAD_PARAM;
+
+    if (params->brake_enable &&
+        (params->brake_deadband < 0.0f ||
+         params->brake_rate_limit_per_s < 0.0f ||
+         params->brake_map_high.min_brake >= params->brake_map_high.max_brake ||
+         params->brake_map_high.min_decel >= params->brake_map_high.max_decel ||
+         params->brake_map_mid.min_brake >= params->brake_map_mid.max_brake ||
+         params->brake_map_mid.min_decel >= params->brake_map_mid.max_decel ||
+         params->brake_map_low.min_brake >= params->brake_map_low.max_brake ||
+         params->brake_map_low.min_decel >= params->brake_map_low.max_decel))
+        return VC_ERR_BAD_PARAM;
+
+    if (params->coop_enable &&
+        (params->tick_hz <= 0 ||
+         params->coop_timeout_s < 0 ||
+         params->coop_decel_off > params->coop_decel_on))
+        return VC_ERR_BAD_PARAM;
+
+    // TODO More sanity checks
+
+    // Start from 0 and safe default values
+    memset(ctrl, 0, sizeof(*ctrl));
+    ctrl->brake_active = false;
+    ctrl->brake_cmd_prev = 0.0f;
+    ctrl->current_range = VC_SPEED_RANGE_LOW;
+    ctrl->act_mode = VC_ACT_MODE_COAST;
+
+    pid_controller_t *pidptr = &(ctrl->speed_pid);
+
+    pid_err_t piderr = pid_init(
+        pidptr,
+        (pid_float)params->gains_low.kp,
+        (pid_float)params->gains_low.ki,
+        (pid_float)params->gains_low.kd,
+        (pid_float)params->gains_low.n,
+        params->pid_ts_s);
+    if (piderr != _PID_OK)
+        return VC_ERR_PIDLIB;
+
+    piderr = pid_reset(pidptr);
+    if (piderr != _PID_OK)
+        return VC_ERR_PIDLIB;
+
+    piderr = pid_set_anti_windup(pidptr, _PID_ANTI_WINDUP_INTEGRATOR_CLAMPING);
+    if (piderr != _PID_OK)
+        return VC_ERR_PIDLIB;
+
+    // KAW and clamping are hardcoded for now.
+    piderr = pid_set_kb_aw(pidptr, 1.0f);
+    if (piderr != _PID_OK)
+        return VC_ERR_PIDLIB;
+
+    piderr = pid_set_derivative_on_meas(pidptr, _PID_DERIVATIVE_ON_MEASURE_ON);
+    if (piderr != _PID_OK)
+        return VC_ERR_PIDLIB;
+
+    piderr = pid_set_discretization_method(pidptr, _PID_DISCRETE_TUSTIN);
+    if (piderr != _PID_OK)
+        return VC_ERR_PIDLIB;
+
+    // Signed actuator: u in [-1, 1]
+    piderr = pid_set_clamping(pidptr, 1.0f, -1.0f);
+    if (piderr != _PID_OK)
+        return VC_ERR_PIDLIB;
+
+    return VC_OK;
+}
+
+
+static inline VC_Err_t vc_apply_gains(vehicle_controller_t *ctrl,
+                                     const vehicle_controller_params_t *params,
+                                     VC_SpeedRange_t range)
+{
+    pid_err_t piderr = _PID_OK;
+    switch (range)
+    {
+    case VC_SPEED_RANGE_LOW:
+        piderr = pid_set_params(
+            &(ctrl->speed_pid),
+            params->gains_low.kp,
+            params->gains_low.ki,
+            params->gains_low.kd,
+            params->gains_low.n,
+            params->pid_ts_s,
+            ctrl->speed_pid.kb_aw);
+        break;
+    case VC_SPEED_RANGE_MID:
+        piderr = pid_set_params(
+            &(ctrl->speed_pid),
+            params->gains_mid.kp,
+            params->gains_mid.ki,
+            params->gains_mid.kd,
+            params->gains_mid.n,
+            params->pid_ts_s,
+            ctrl->speed_pid.kb_aw);
+        break;
+    case VC_SPEED_RANGE_HIGH:
+        piderr = pid_set_params(
+            &(ctrl->speed_pid),
+            params->gains_high.kp,
+            params->gains_high.ki,
+            params->gains_high.kd,
+            params->gains_high.n,
+            params->pid_ts_s,
+            ctrl->speed_pid.kb_aw);
+        break;
+    default:
+        break;
+    }
+
+    return (piderr == _PID_OK) ? VC_OK : VC_ERR_PIDLIB;
+}
+
+
+VC_Err_t vehicle_controller_step(vehicle_controller_t *ctrl,
+                                 const vehicle_controller_params_t *params,
+                                 const vehicle_controller_inputs_t *in,
+                                 VC_Tick_t now_tick,
+                                 vehicle_controller_outputs_t *out)
+{
+    if (ctrl == NULL || params == NULL || in == NULL || out == NULL)
+        return VC_ERR_NULL_PARAM;
+
+    // Gain scheduling using current speed + hysteresis to avoid chatter
+    VC_SpeedRange_t prev = ctrl->current_range;
+    switch (prev)
+    {
+    case VC_SPEED_RANGE_LOW:
+        if (in->speed_mps > (params->v1_mps + params->hysteresis_mps))
+            ctrl->current_range = VC_SPEED_RANGE_MID;
+        break;
+    case VC_SPEED_RANGE_MID:
+        if (in->speed_mps > (params->v2_mps + params->hysteresis_mps))
+        {
+            ctrl->current_range = VC_SPEED_RANGE_HIGH;
+        }
+        else if (in->speed_mps < (params->v1_mps - params->hysteresis_mps))
+        {
+            ctrl->current_range = VC_SPEED_RANGE_LOW;
+        }
+        break;
+    case VC_SPEED_RANGE_HIGH:
+        if (in->speed_mps < (params->v2_mps - params->hysteresis_mps))
+            ctrl->current_range = VC_SPEED_RANGE_MID;
+        break;
+    default:
+        break;
+    }
+
+    // Apply new gains when switching ranges.
+    // pid_set_params() triggers bumpless tuning (see pid_stm32.c), so the PID
+    // output does not jump due to integrator discontinuity.
+    if (ctrl->current_range != prev)
+    {
+        VC_Err_t e = vc_apply_gains(ctrl, params, ctrl->current_range);
+        if (e != VC_OK)
+            return e;
+    }
+
+    // Compute effective speed setpoint (same spacing correction logic as before)
+    float speed_sp = in->platoon_enabled ? in->platoon_setpoint_mps : in->indiv_setpoint_mps;
+
+    // Preceding speed can be missing early; treat as equal speed.
+    const float v_lead = (in->preceding_speed_mps > 0.0f) ? in->preceding_speed_mps : in->speed_mps;
+    const float speed_diff = v_lead - in->speed_mps;
+
+    if ((params->platoon_index > 0) && (in->distance_to_front_m > 0.0f))
+    {
+        const float desired_dist = fmaxf(
+            params->min_spacing_m + 3.0f,
+            in->speed_mps * params->desired_time_headway_s + params->min_spacing_m);
+
+        const float dist_error = in->distance_to_front_m - desired_dist;
+
+        float d_sp = (params->k_dist * dist_error) + (params->k_vel * speed_diff);
+        if (dist_error < 0.0f)
+            d_sp = 4.0f * d_sp;
+
+        speed_sp = fminf(speed_sp + d_sp, params->speed_sp_max_mps);
+        speed_sp = fmaxf(speed_sp, params->speed_sp_min_mps);
+    }
+    else
+    {
+        speed_sp = fminf(speed_sp, params->speed_sp_max_mps);
+        speed_sp = fmaxf(speed_sp, params->speed_sp_min_mps);
+    }
+    // SINGLE PID MODE: signed control output u in [-1, 1]
+    const float u = (float)pid_run(&(ctrl->speed_pid), speed_sp, in->speed_mps);
+
+    // Actuator selection hysteresis (mode latch) to avoid chatter near u=0
+    const float u_db_on  = 0.08f;
+    const float u_db_off = 0.04f;
+
+    switch (ctrl->act_mode)
+    {
+    case VC_ACT_MODE_COAST:
+        if (u >= u_db_on)
+            ctrl->act_mode = VC_ACT_MODE_THROTTLE;
+        else if (u <= -u_db_on)
+            ctrl->act_mode = VC_ACT_MODE_BRAKE;
+        break;
+    case VC_ACT_MODE_THROTTLE:
+        if (u <= -u_db_on)
+            ctrl->act_mode = VC_ACT_MODE_BRAKE;
+        else if (u < u_db_off)
+            ctrl->act_mode = VC_ACT_MODE_COAST;
+        break;
+    case VC_ACT_MODE_BRAKE:
+        if (u >= u_db_on)
+            ctrl->act_mode = VC_ACT_MODE_THROTTLE;
+        else if (u > -u_db_off)
+            ctrl->act_mode = VC_ACT_MODE_COAST;
+        break;
+    default:
+        ctrl->act_mode = VC_ACT_MODE_COAST;
+        break;
+    }
+
+    float throttle = 0.0f;
+    float brake = 0.0f;
+
+    if (ctrl->act_mode == VC_ACT_MODE_THROTTLE)
+    {
+        throttle = fminf(1.0f, fmaxf(0.0f, u));
+        brake = 0.0f;
+    }
+    else if (ctrl->act_mode == VC_ACT_MODE_BRAKE)
+    {
+        throttle = 0.0f;
+        brake = fminf(1.0f, fmaxf(0.0f, -u));
+    }
+    else
+    {
+        throttle = 0.0f;
+        brake = 0.0f;
+    }
+
+    // Expose a simple cooperative braking intent based on commanded brake.
+    // (We do not have an acceleration sensor; this is a commanded intent signal.)
+    const float desired_decel = brake * fmaxf(0.0f, params->decel_full);
+
+    ctrl->brake_active = (brake > 0.0f);
+    ctrl->brake_cmd_prev = brake;
+    ctrl->desired_decel_mps2 = desired_decel;
+
+    ctrl->last_step_tick = now_tick;
+    ctrl->have_last_step_tick = true;
+
+    out->throttle_cmd = throttle;
+    out->brake_cmd = brake;
+    out->desired_decel_mps2 = desired_decel;
+    out->effective_speed_sp_mps = speed_sp;
+
+    return VC_OK;
+}
