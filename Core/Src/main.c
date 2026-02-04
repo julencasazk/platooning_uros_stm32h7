@@ -38,6 +38,7 @@
 
 #include <stdbool.h>
 #include <string.h>
+#include <stdio.h>
 
 #include "vehicle_controller.h"
 
@@ -271,6 +272,7 @@ volatile TickType_t g_dbg_hz_window_start_tick = 0;
 // DEBUG -------------------------------
 
 // Platoon participation config
+const char *preceding_veh_name = "veh_2";
 const char *participant_name = "veh_3";
 volatile bool platoon_enabled = true;
 
@@ -282,17 +284,17 @@ rcl_publisher_t local_sp_pub;
 // Cooperative ETSI CAM publisher
 rcl_publisher_t cam_pub;
 
-// Diagnostics publishers (memory/RTOS health)
-rcl_publisher_t diag_free_heap_pub;
-rcl_publisher_t diag_min_ever_free_heap_pub;
-rcl_publisher_t diag_uros_stack_free_pub;
-rcl_publisher_t diag_ctrl_stack_free_pub;
-rcl_publisher_t diag_microros_alloc_pub;
-rcl_publisher_t diag_microros_free_pub;
-rcl_publisher_t diag_microros_realloc_pub;
-rcl_publisher_t diag_microros_calloc_pub;
-rcl_publisher_t diag_microros_used_bytes_pub;
-rcl_publisher_t diag_microros_abs_used_bytes_pub;
+// Diagnostics publishers
+//rcl_publisher_t diag_free_heap_pub;
+//rcl_publisher_t diag_min_ever_free_heap_pub;
+//rcl_publisher_t diag_uros_stack_free_pub;
+//rcl_publisher_t diag_ctrl_stack_free_pub;
+//rcl_publisher_t diag_microros_alloc_pub;
+//rcl_publisher_t diag_microros_free_pub;
+//rcl_publisher_t diag_microros_realloc_pub;
+//rcl_publisher_t diag_microros_calloc_pub;
+//rcl_publisher_t diag_microros_used_bytes_pub;
+//rcl_publisher_t diag_microros_abs_used_bytes_pub;
 
 
 
@@ -320,16 +322,16 @@ std_msgs__msg__Float32 local_sp_msg;
 etsi_its_lite_msgs__msg__CAM cam_msg;
 
 // Diagnostics message instances
-std_msgs__msg__UInt32 diag_free_heap_msg;
-std_msgs__msg__UInt32 diag_min_ever_free_heap_msg;
-std_msgs__msg__UInt32 diag_uros_stack_free_msg;
-std_msgs__msg__UInt32 diag_ctrl_stack_free_msg;
-std_msgs__msg__UInt32 diag_microros_alloc_msg;
-std_msgs__msg__UInt32 diag_microros_free_msg;
-std_msgs__msg__UInt32 diag_microros_realloc_msg;
-std_msgs__msg__UInt32 diag_microros_calloc_msg;
-std_msgs__msg__UInt32 diag_microros_used_bytes_msg;
-std_msgs__msg__UInt32 diag_microros_abs_used_bytes_msg;
+//std_msgs__msg__UInt32 diag_free_heap_msg;
+//std_msgs__msg__UInt32 diag_min_ever_free_heap_msg;
+//std_msgs__msg__UInt32 diag_uros_stack_free_msg;
+//std_msgs__msg__UInt32 diag_ctrl_stack_free_msg;
+//std_msgs__msg__UInt32 diag_microros_alloc_msg;
+//std_msgs__msg__UInt32 diag_microros_free_msg;
+//std_msgs__msg__UInt32 diag_microros_realloc_msg;
+//std_msgs__msg__UInt32 diag_microros_calloc_msg;
+//std_msgs__msg__UInt32 diag_microros_used_bytes_msg;
+//std_msgs__msg__UInt32 diag_microros_abs_used_bytes_msg;
 
 
 
@@ -917,106 +919,108 @@ void StartUROSTask(void *argument)
 
 	rclc_support_init_with_options(&support, 0, NULL, &init_options, &allocator);
 
-	// TODO change hardcoded names with a configurable name
+	// Topic/name helpers
 	char tmpbuff[150];
-	strcpy(tmpbuff, participant_name);
-
-		CHECK(rclc_node_init_default(&node, "veh_3_node", "", &support));
-	strcpy(tmpbuff, participant_name);
+	snprintf(tmpbuff, sizeof(tmpbuff), "%s_node", participant_name);
+	CHECK(rclc_node_init_default(&node, tmpbuff, "", &support));
 
 	// Initialize message structs used by executor/publishers (avoid uninitialized memory)
 	(void)platooning_msgs__msg__VehicleState__init(&state_msg);
 	(void)etsi_its_lite_msgs__msg__CAM__init(&cam_msg);
-	(void)std_msgs__msg__UInt32__init(&diag_free_heap_msg);
-	(void)std_msgs__msg__UInt32__init(&diag_min_ever_free_heap_msg);
-	(void)std_msgs__msg__UInt32__init(&diag_uros_stack_free_msg);
-	(void)std_msgs__msg__UInt32__init(&diag_ctrl_stack_free_msg);
-	(void)std_msgs__msg__UInt32__init(&diag_microros_alloc_msg);
-	(void)std_msgs__msg__UInt32__init(&diag_microros_free_msg);
-	(void)std_msgs__msg__UInt32__init(&diag_microros_realloc_msg);
-	(void)std_msgs__msg__UInt32__init(&diag_microros_calloc_msg);
-	(void)std_msgs__msg__UInt32__init(&diag_microros_used_bytes_msg);
-	(void)std_msgs__msg__UInt32__init(&diag_microros_abs_used_bytes_msg);
+	//(void)std_msgs__msg__UInt32__init(&diag_free_heap_msg);
+	//(void)std_msgs__msg__UInt32__init(&diag_min_ever_free_heap_msg);
+	//(void)std_msgs__msg__UInt32__init(&diag_uros_stack_free_msg);
+	//(void)std_msgs__msg__UInt32__init(&diag_ctrl_stack_free_msg);
+	//(void)std_msgs__msg__UInt32__init(&diag_microros_alloc_msg);
+	//(void)std_msgs__msg__UInt32__init(&diag_microros_free_msg);
+	//(void)std_msgs__msg__UInt32__init(&diag_microros_realloc_msg);
+	//(void)std_msgs__msg__UInt32__init(&diag_microros_calloc_msg);
+	//(void)std_msgs__msg__UInt32__init(&diag_microros_used_bytes_msg);
+	//(void)std_msgs__msg__UInt32__init(&diag_microros_abs_used_bytes_msg);
 	(void)etsi_its_lite_msgs__msg__CAM__init(&prec_cam_msg);
 
 	// PUBS ------------------------------------------------------------
 
+	snprintf(tmpbuff, sizeof(tmpbuff), "%s/command/throttle", participant_name);
 	CHECK(rclc_publisher_init_best_effort(&throttle_pub, &node,
 										  ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
-										  "veh_3/command/throttle"));
+										  tmpbuff));
 
-	strcpy(tmpbuff, participant_name);
+	snprintf(tmpbuff, sizeof(tmpbuff), "%s/command/brake", participant_name);
 	CHECK(rclc_publisher_init_best_effort(&brake_pub, &node,
 										  ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
-										  "veh_3/command/brake"));
+										  tmpbuff));
 
-	strcpy(tmpbuff, participant_name);
+	snprintf(tmpbuff, sizeof(tmpbuff), "%s/state/desired_decel", participant_name);
 	CHECK(rclc_publisher_init_best_effort(&braking_intent_pub, &node,
 										  ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
-										  "veh_3/state/desired_decel"));
+										  tmpbuff));
 
-		CHECK(rclc_publisher_init_best_effort(&local_sp_pub, &node,
+	snprintf(tmpbuff, sizeof(tmpbuff), "%s/state/local_setpoint", participant_name);
+	CHECK(rclc_publisher_init_best_effort(&local_sp_pub, &node,
 										  ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
-										  "veh_3/state/local_setpoint"));
+										  tmpbuff));
 
 	// ETSI CAM publisher (Python side subscribes to /veh_0/cam)
+	snprintf(tmpbuff, sizeof(tmpbuff), "/%s/cam", participant_name);
 	CHECK(rclc_publisher_init_best_effort(&cam_pub, &node,
 										  ROSIDL_GET_MSG_TYPE_SUPPORT(etsi_its_lite_msgs, msg, CAM),
-										  "/veh_3/cam"));
+										  tmpbuff));
 
-	// Diagnostics publishers (UInt32), published periodically (1 Hz)
-	CHECK(rclc_publisher_init_best_effort(&diag_free_heap_pub, &node,
-								 ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
-								 "veh_3/diag/free_heap_bytes"));
-	CHECK(rclc_publisher_init_best_effort(&diag_min_ever_free_heap_pub, &node,
-								 ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
-								 "veh_3/diag/min_ever_free_heap_bytes"));
-	CHECK(rclc_publisher_init_best_effort(&diag_uros_stack_free_pub, &node,
-								 ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
-								 "veh_3/diag/uros_stack_free_bytes"));
-	CHECK(rclc_publisher_init_best_effort(&diag_ctrl_stack_free_pub, &node,
-								 ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
-								 "veh_3/diag/ctrl_stack_free_bytes"));
-	CHECK(rclc_publisher_init_best_effort(&diag_microros_alloc_pub, &node,
-								 ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
-								 "veh_3/diag/microros_alloc_count"));
-	CHECK(rclc_publisher_init_best_effort(&diag_microros_free_pub, &node,
-								 ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
-								 "veh_3/diag/microros_free_count"));
-	CHECK(rclc_publisher_init_best_effort(&diag_microros_realloc_pub, &node,
-								 ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
-								 "veh_3/diag/microros_realloc_count"));
-	CHECK(rclc_publisher_init_best_effort(&diag_microros_calloc_pub, &node,
-								 ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
-								 "veh_3/diag/microros_calloc_count"));
-	CHECK(rclc_publisher_init_best_effort(&diag_microros_used_bytes_pub, &node,
-								 ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
-								 "veh_3/diag/microros_used_bytes"));
-	CHECK(rclc_publisher_init_best_effort(&diag_microros_abs_used_bytes_pub, &node,
-								 ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
-								 "veh_3/diag/microros_total_allocated_bytes"));
+//	// Diagnostics publishers (UInt32), published periodically (1 Hz)
+	//CHECK(rclc_publisher_init_best_effort(&diag_free_heap_pub, &node,
+								 //ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
+								 //"veh_3/diag/free_heap_bytes"));
+	//CHECK(rclc_publisher_init_best_effort(&diag_min_ever_free_heap_pub, &node,
+								 //ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
+								 //"veh_3/diag/min_ever_free_heap_bytes"));
+	//CHECK(rclc_publisher_init_best_effort(&diag_uros_stack_free_pub, &node,
+								 //ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
+								 //"veh_3/diag/uros_stack_free_bytes"));
+	//CHECK(rclc_publisher_init_best_effort(&diag_ctrl_stack_free_pub, &node,
+								 //ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
+								 //"veh_3/diag/ctrl_stack_free_bytes"));
+	//CHECK(rclc_publisher_init_best_effort(&diag_microros_alloc_pub, &node,
+								 //ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
+								 //"veh_3/diag/microros_alloc_count"));
+	//CHECK(rclc_publisher_init_best_effort(&diag_microros_free_pub, &node,
+								 //ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
+								 //"veh_3/diag/microros_free_count"));
+	//CHECK(rclc_publisher_init_best_effort(&diag_microros_realloc_pub, &node,
+								 //ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
+								 //"veh_3/diag/microros_realloc_count"));
+	//CHECK(rclc_publisher_init_best_effort(&diag_microros_calloc_pub, &node,
+								 //ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
+								 //"veh_3/diag/microros_calloc_count"));
+	//CHECK(rclc_publisher_init_best_effort(&diag_microros_used_bytes_pub, &node,
+								 //ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
+								 //"veh_3/diag/microros_used_bytes"));
+	//CHECK(rclc_publisher_init_best_effort(&diag_microros_abs_used_bytes_pub, &node,
+								 //ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
+								 //"veh_3/diag/microros_total_allocated_bytes"));
 
 
 	// SUBS -------------------------------------------------------------
 
-	strcpy(tmpbuff, participant_name);
+	snprintf(tmpbuff, sizeof(tmpbuff), "/%s/state", participant_name);
 	CHECK(rclc_subscription_init_best_effort(&state_sub, &node,
 												 ROSIDL_GET_MSG_TYPE_SUPPORT(platooning_msgs, msg, VehicleState),
-												 "/veh_3/state"));
+												 tmpbuff));
 
-	strcpy(tmpbuff, participant_name);
+	snprintf(tmpbuff, sizeof(tmpbuff), "%s/state/setpoint", participant_name);
 	CHECK(rclc_subscription_init_best_effort(&r_sub, &node,
 												 ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
-												 "veh_3/state/setpoint"));
+												 tmpbuff));
 
 	CHECK(rclc_subscription_init_best_effort(&plat_r_sub, &node,
 												 ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
 												 "platoon/plat_0/setpoint")); // TODO hardcoded platoon ID, must be changable later
 
 	// Predecessor CAM subscription (veh_2 -> veh_3)
+	snprintf(tmpbuff, sizeof(tmpbuff), "/%s/cam", preceding_veh_name);
 	CHECK(rclc_subscription_init_best_effort(&prec_cam_sub, &node,
 								 ROSIDL_GET_MSG_TYPE_SUPPORT(etsi_its_lite_msgs, msg, CAM),
-								 "/veh_2/cam"));
+								 tmpbuff));
 
 	// Executor init -------------------------------------------------------------
 
@@ -1105,44 +1109,46 @@ void StartUROSTask(void *argument)
 
 		rclc_executor_spin_some(&executor, 2);
 
-		// Publish diagnostics periodically (1 Hz) for logging/plotting on the PC.
-		static TickType_t last_diag_pub_tick = 0;
-		TickType_t now_diag = xTaskGetTickCount();
-		if ((last_diag_pub_tick == 0) || ((now_diag - last_diag_pub_tick) >= pdMS_TO_TICKS(1000)))
-		{
-			last_diag_pub_tick = now_diag;
-			uint32_t free_heap = (uint32_t)xPortGetFreeHeapSize();
-			uint32_t min_ever_free_heap = (uint32_t)xPortGetMinimumEverFreeHeapSize();
-			uint32_t uros_stack_free_b = (uint32_t)uxTaskGetStackHighWaterMark((TaskHandle_t)uROSTaskHandle) * (uint32_t)sizeof(StackType_t);
-			uint32_t ctrl_stack_free_b = (uint32_t)uxTaskGetStackHighWaterMark((TaskHandle_t)ctrlTaskHandle) * (uint32_t)sizeof(StackType_t);
-			uint32_t a_cnt, f_cnt, r_cnt, c_cnt;
-			taskENTER_CRITICAL();
-			a_cnt = g_dbg_microros_alloc_count;
-			f_cnt = g_dbg_microros_free_count;
-			r_cnt = g_dbg_microros_realloc_count;
-			c_cnt = g_dbg_microros_calloc_count;
-			taskEXIT_CRITICAL();
-			diag_free_heap_msg.data = free_heap;
-			diag_min_ever_free_heap_msg.data = min_ever_free_heap;
-			diag_uros_stack_free_msg.data = uros_stack_free_b;
-			diag_ctrl_stack_free_msg.data = ctrl_stack_free_b;
-			diag_microros_alloc_msg.data = a_cnt;
-			diag_microros_free_msg.data = f_cnt;
-			diag_microros_realloc_msg.data = r_cnt;
-			diag_microros_calloc_msg.data = c_cnt;
-			diag_microros_used_bytes_msg.data = (uint32_t)((usedMemory < 0) ? 0 : usedMemory);
-			diag_microros_abs_used_bytes_msg.data = (uint32_t)((absoluteUsedMemory < 0) ? 0 : absoluteUsedMemory);
-			(void)rcl_publish(&diag_free_heap_pub, &diag_free_heap_msg, NULL);
-			(void)rcl_publish(&diag_min_ever_free_heap_pub, &diag_min_ever_free_heap_msg, NULL);
-			(void)rcl_publish(&diag_uros_stack_free_pub, &diag_uros_stack_free_msg, NULL);
-			(void)rcl_publish(&diag_ctrl_stack_free_pub, &diag_ctrl_stack_free_msg, NULL);
-			(void)rcl_publish(&diag_microros_alloc_pub, &diag_microros_alloc_msg, NULL);
-			(void)rcl_publish(&diag_microros_free_pub, &diag_microros_free_msg, NULL);
-			(void)rcl_publish(&diag_microros_realloc_pub, &diag_microros_realloc_msg, NULL);
-			(void)rcl_publish(&diag_microros_calloc_pub, &diag_microros_calloc_msg, NULL);
-			(void)rcl_publish(&diag_microros_used_bytes_pub, &diag_microros_used_bytes_msg, NULL);
-			(void)rcl_publish(&diag_microros_abs_used_bytes_pub, &diag_microros_abs_used_bytes_msg, NULL);
-		}
+//		// MEMORY FOOTPRINT DIAGNOSTICS
+		//// ============================================================================
+		//static TickType_t last_diag_pub_tick = 0;
+		//TickType_t now_diag = xTaskGetTickCount();
+		//if ((last_diag_pub_tick == 0) || ((now_diag - last_diag_pub_tick) >= pdMS_TO_TICKS(1000)))
+		//{
+			//last_diag_pub_tick = now_diag;
+			//uint32_t free_heap = (uint32_t)xPortGetFreeHeapSize();
+			//uint32_t min_ever_free_heap = (uint32_t)xPortGetMinimumEverFreeHeapSize();
+			//uint32_t uros_stack_free_b = (uint32_t)uxTaskGetStackHighWaterMark((TaskHandle_t)uROSTaskHandle) * (uint32_t)sizeof(StackType_t);
+			//uint32_t ctrl_stack_free_b = (uint32_t)uxTaskGetStackHighWaterMark((TaskHandle_t)ctrlTaskHandle) * (uint32_t)sizeof(StackType_t);
+			//uint32_t a_cnt, f_cnt, r_cnt, c_cnt;
+			//taskENTER_CRITICAL();
+			//a_cnt = g_dbg_microros_alloc_count;
+			//f_cnt = g_dbg_microros_free_count;
+			//r_cnt = g_dbg_microros_realloc_count;
+			//c_cnt = g_dbg_microros_calloc_count;
+			//taskEXIT_CRITICAL();
+			//diag_free_heap_msg.data = free_heap;
+			//diag_min_ever_free_heap_msg.data = min_ever_free_heap;
+			//diag_uros_stack_free_msg.data = uros_stack_free_b;
+			//diag_ctrl_stack_free_msg.data = ctrl_stack_free_b;
+			//diag_microros_alloc_msg.data = a_cnt;
+			//diag_microros_free_msg.data = f_cnt;
+			//diag_microros_realloc_msg.data = r_cnt;
+			//diag_microros_calloc_msg.data = c_cnt;
+			//diag_microros_used_bytes_msg.data = (uint32_t)((usedMemory < 0) ? 0 : usedMemory);
+			//diag_microros_abs_used_bytes_msg.data = (uint32_t)((absoluteUsedMemory < 0) ? 0 : absoluteUsedMemory);
+			//(void)rcl_publish(&diag_free_heap_pub, &diag_free_heap_msg, NULL);
+			//(void)rcl_publish(&diag_min_ever_free_heap_pub, &diag_min_ever_free_heap_msg, NULL);
+			//(void)rcl_publish(&diag_uros_stack_free_pub, &diag_uros_stack_free_msg, NULL);
+			//(void)rcl_publish(&diag_ctrl_stack_free_pub, &diag_ctrl_stack_free_msg, NULL);
+			//(void)rcl_publish(&diag_microros_alloc_pub, &diag_microros_alloc_msg, NULL);
+			//(void)rcl_publish(&diag_microros_free_pub, &diag_microros_free_msg, NULL);
+			//(void)rcl_publish(&diag_microros_realloc_pub, &diag_microros_realloc_msg, NULL);
+			//(void)rcl_publish(&diag_microros_calloc_pub, &diag_microros_calloc_msg, NULL);
+			//(void)rcl_publish(&diag_microros_used_bytes_pub, &diag_microros_used_bytes_msg, NULL);
+			//(void)rcl_publish(&diag_microros_abs_used_bytes_pub, &diag_microros_abs_used_bytes_msg, NULL);
+		//}
+		//// END DIAG ===============================================================================================
 
 		// Publish immediately when a command is computed in control task
 		uint32_t n = ulTaskNotifyTake(pdTRUE, 0);
@@ -1181,8 +1187,8 @@ void StartUROSTask(void *argument)
 				CHECK(rcl_publish(&braking_intent_pub, &braking_intent_msg, NULL));
 				CHECK(rcl_publish(&local_sp_pub, &local_sp_msg, NULL));
 
-				// Publish ETSI CAM at ~10 Hz (rate-limited).
-				// Speed is encoded as m/s * 100, deceleration_intent as m/s^2 * 10.
+				// Publish ETSI CAM at ~10 Hz 
+				// Speed is encoded as m/s * 100, deceleration_intent as m/s^2 * 10. Like the ETSI CAM ANS.1 encoding
 				if ((g_last_cam_pub_tick == 0) || ((now_pub - g_last_cam_pub_tick) >= pdMS_TO_TICKS(100)))
 				{
 					g_last_cam_pub_tick = now_pub;

@@ -120,8 +120,6 @@ VC_Err_t vehicle_controller_step(vehicle_controller_t *ctrl,
         break;
     }
 
-    // When switching gains, rely on the PID library's bumpless transfer support
-    // (pid_set_params() marks bumpless_pending; next pid_run() adjusts i_state).
     if (ctrl->current_range != prev)
     {
         switch (ctrl->current_range)
@@ -172,7 +170,7 @@ VC_Err_t vehicle_controller_step(vehicle_controller_t *ctrl,
     float ttc = 0.0f;
     float dist_error = 0.0f;
 
-    // Preceding speed can be missing early; treat as equal speed (no closing).
+    // Preceding speed can be missing early, treat as equal speed (no closing)
     const float v_lead = (in->preceding_speed_mps > 0.0f) ? in->preceding_speed_mps : in->speed_mps;
     const float speed_diff_raw = v_lead - in->speed_mps;
     float speed_diff = speed_diff_raw;
@@ -195,12 +193,12 @@ VC_Err_t vehicle_controller_step(vehicle_controller_t *ctrl,
             ttc = 1e3f; // Large number, in Python its "inf"
         }
 
-        // Choose between normal vs urgent spacing gains based on TTC.
+        // Choose between normal vs urgent spacing gains based on TTC
         const bool urgent = (ttc < fmaxf(0.0f, params->ttc_panic_s));
         const float k_dist = urgent ? params->k_dist_urgent : params->k_dist_normal;
         const float k_vel = urgent ? params->k_vel_urgent : params->k_vel_normal;
 
-        // Deadzones to prevent small errors from causing oscillations in local setpoint.
+        // Deadzones to prevent small errors from causing oscillations in local setpoint
         if (fabsf(dist_error) < fmaxf(0.0f, params->dist_err_deadband_m))
         {
             dist_error = 0.0f;
@@ -320,8 +318,6 @@ VC_Err_t vehicle_controller_step(vehicle_controller_t *ctrl,
         {
             if (!ctrl->brake_active)
             {
-                // Do not reset the PID state here; we want gain-scheduling changes
-                // (and any future transitions) to be bumpless and avoid output jumps.
                 ctrl->brake_active = true;
             }
 
