@@ -51,22 +51,8 @@ typedef struct {
    // Spacing and setpoint correction
    float desired_time_headway_s;
    float min_spacing_m;
-   // Normal spacing correction gains
-   float k_dist_normal;
-   float k_vel_normal;
-
-   // Urgent (panic) spacing correction gains (used when TTC indicates danger)
-   float k_dist_urgent;
-   float k_vel_urgent;
-
-   // If estimated TTC [s] is below this threshold, use urgent gains.
-   float ttc_panic_s;
-
-   // Deadzones for spacing correction to reduce oscillations/chatter.
-   // If |dist_error| < dist_err_deadband_m, treat dist_error as 0.
-   // If |vel_diff| < vel_diff_deadband_mps, treat vel_diff as 0.
-   float dist_err_deadband_m;
-   float vel_diff_deadband_mps;
+   float k_dist;
+   float k_vel;
    float speed_sp_min_mps;
    float speed_sp_max_mps;
 
@@ -84,9 +70,6 @@ typedef struct {
 
    // Brake supervisor config
    bool brake_enable;
-   // If > 0, brake mapping logic is only allowed when distance_to_front_m <= this.
-   // Outside this range the controller falls back to the signed PID (throttle/brake).
-   float brake_map_max_dist_m;
    float brake_deadband;
    float brake_rate_limit_per_s; // brake units per second
    float k_brake;                // global gain on brake mapping
@@ -119,10 +102,19 @@ typedef struct {
    uint32_t tick_hz; // Should match FreeRTOS control task tickrate 
 } vehicle_controller_params_t;
 
+typedef enum {
+   VC_ACT_MODE_COAST = 0,
+   VC_ACT_MODE_THROTTLE = 1,
+   VC_ACT_MODE_BRAKE = 2,
+} VC_ActMode_t;
+
 typedef struct {
    // Speed PID controller state
    pid_controller_t speed_pid;
    VC_SpeedRange_t current_range;
+
+   // Actuator selection hysteresis state for single signed PID mode
+   VC_ActMode_t act_mode;
 
    // Brake supervisor state
    bool brake_active;

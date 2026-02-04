@@ -252,11 +252,6 @@ volatile uint32_t g_dbg_microros_free_count = 0;
 volatile uint32_t g_dbg_microros_realloc_count = 0;
 volatile uint32_t g_dbg_microros_calloc_count = 0;
 
-// micro-ROS allocator byte accounting (from microros_allocators.c)
-extern int usedMemory;
-extern int absoluteUsedMemory;
-
-
 // DEBUG -------------------------------
 // Hz debug: callback rates measured over a 1s tick window.
 volatile uint32_t g_dbg_speed_cb_count_total = 0;
@@ -291,9 +286,6 @@ rcl_publisher_t diag_microros_alloc_pub;
 rcl_publisher_t diag_microros_free_pub;
 rcl_publisher_t diag_microros_realloc_pub;
 rcl_publisher_t diag_microros_calloc_pub;
-rcl_publisher_t diag_microros_used_bytes_pub;
-rcl_publisher_t diag_microros_abs_used_bytes_pub;
-
 
 
 // Subscribers
@@ -328,9 +320,6 @@ std_msgs__msg__UInt32 diag_microros_alloc_msg;
 std_msgs__msg__UInt32 diag_microros_free_msg;
 std_msgs__msg__UInt32 diag_microros_realloc_msg;
 std_msgs__msg__UInt32 diag_microros_calloc_msg;
-std_msgs__msg__UInt32 diag_microros_used_bytes_msg;
-std_msgs__msg__UInt32 diag_microros_abs_used_bytes_msg;
-
 
 
 rclc_support_t support;
@@ -935,8 +924,6 @@ void StartUROSTask(void *argument)
 	(void)std_msgs__msg__UInt32__init(&diag_microros_free_msg);
 	(void)std_msgs__msg__UInt32__init(&diag_microros_realloc_msg);
 	(void)std_msgs__msg__UInt32__init(&diag_microros_calloc_msg);
-	(void)std_msgs__msg__UInt32__init(&diag_microros_used_bytes_msg);
-	(void)std_msgs__msg__UInt32__init(&diag_microros_abs_used_bytes_msg);
 	(void)etsi_its_lite_msgs__msg__CAM__init(&prec_cam_msg);
 
 	// PUBS ------------------------------------------------------------
@@ -989,13 +976,6 @@ void StartUROSTask(void *argument)
 	CHECK(rclc_publisher_init_best_effort(&diag_microros_calloc_pub, &node,
 								 ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
 								 "veh_3/diag/microros_calloc_count"));
-	CHECK(rclc_publisher_init_best_effort(&diag_microros_used_bytes_pub, &node,
-								 ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
-								 "veh_3/diag/microros_used_bytes"));
-	CHECK(rclc_publisher_init_best_effort(&diag_microros_abs_used_bytes_pub, &node,
-								 ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
-								 "veh_3/diag/microros_total_allocated_bytes"));
-
 
 	// SUBS -------------------------------------------------------------
 
@@ -1130,8 +1110,6 @@ void StartUROSTask(void *argument)
 			diag_microros_free_msg.data = f_cnt;
 			diag_microros_realloc_msg.data = r_cnt;
 			diag_microros_calloc_msg.data = c_cnt;
-			diag_microros_used_bytes_msg.data = (uint32_t)((usedMemory < 0) ? 0 : usedMemory);
-			diag_microros_abs_used_bytes_msg.data = (uint32_t)((absoluteUsedMemory < 0) ? 0 : absoluteUsedMemory);
 			(void)rcl_publish(&diag_free_heap_pub, &diag_free_heap_msg, NULL);
 			(void)rcl_publish(&diag_min_ever_free_heap_pub, &diag_min_ever_free_heap_msg, NULL);
 			(void)rcl_publish(&diag_uros_stack_free_pub, &diag_uros_stack_free_msg, NULL);
@@ -1140,8 +1118,6 @@ void StartUROSTask(void *argument)
 			(void)rcl_publish(&diag_microros_free_pub, &diag_microros_free_msg, NULL);
 			(void)rcl_publish(&diag_microros_realloc_pub, &diag_microros_realloc_msg, NULL);
 			(void)rcl_publish(&diag_microros_calloc_pub, &diag_microros_calloc_msg, NULL);
-			(void)rcl_publish(&diag_microros_used_bytes_pub, &diag_microros_used_bytes_msg, NULL);
-			(void)rcl_publish(&diag_microros_abs_used_bytes_pub, &diag_microros_abs_used_bytes_msg, NULL);
 		}
 
 		// Publish immediately when a command is computed in control task

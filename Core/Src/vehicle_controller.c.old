@@ -22,8 +22,7 @@ VC_Err_t vehicle_controller_init(vehicle_controller_t *ctrl,
         return VC_ERR_BAD_PARAM;
 
     if (params->brake_enable &&
-        (params->brake_map_max_dist_m < 0.0f ||
-         params->brake_deadband < 0.0f ||
+        (params->brake_deadband < 0.0f ||
          params->brake_rate_limit_per_s < 0.0f ||
          params->brake_map_high.min_brake >= params->brake_map_high.max_brake ||
          params->brake_map_high.min_decel >= params->brake_map_high.max_decel ||
@@ -63,7 +62,7 @@ VC_Err_t vehicle_controller_init(vehicle_controller_t *ctrl,
     piderr = pid_reset(pidptr);
     if (piderr != _PID_OK)
         return VC_ERR_PIDLIB;
-    piderr = pid_set_anti_windup(pidptr, _PID_ANTI_WINDUP_INTEGRATOR_CLAMPING);
+    piderr = pid_set_anti_windup(pidptr, _PID_ANTI_WINDUP_BACK_CALCULATION);
     if (piderr != _PID_OK)
         return VC_ERR_PIDLIB;
     // KAW and Clamping values are Hardcoded for now,
@@ -120,10 +119,11 @@ VC_Err_t vehicle_controller_step(vehicle_controller_t *ctrl,
         break;
     }
 
-    // When switching gains, rely on the PID library's bumpless transfer support
-    // (pid_set_params() marks bumpless_pending; next pid_run() adjusts i_state).
+    // Only reset PID internal states when switching gains
     if (ctrl->current_range != prev)
     {
+        pid_reset(&(ctrl->speed_pid));
+
         switch (ctrl->current_range)
         {
         case VC_SPEED_RANGE_LOW:
@@ -174,8 +174,7 @@ VC_Err_t vehicle_controller_step(vehicle_controller_t *ctrl,
 
     // Preceding speed can be missing early; treat as equal speed (no closing).
     const float v_lead = (in->preceding_speed_mps > 0.0f) ? in->preceding_speed_mps : in->speed_mps;
-    const float speed_diff_raw = v_lead - in->speed_mps;
-    float speed_diff = speed_diff_raw;
+    const float speed_diff = v_lead - in->speed_mps; 
 
     // Spacing-based setpoint correction 
     if ((params->platoon_index > 0) && (in->distance_to_front_m > 0.0f))
@@ -185,32 +184,7 @@ VC_Err_t vehicle_controller_step(vehicle_controller_t *ctrl,
             in->speed_mps * params->desired_time_headway_s + params->min_spacing_m);
         dist_error = in->distance_to_front_m - desired_dist;
 
-        // TTC calculation (positive, seconds). Large value when not closing.
-        if ((in->distance_to_front_m > 0.0f) && (speed_diff_raw < -0.1f))
-        {
-            ttc = in->distance_to_front_m / (-1.0f * speed_diff_raw);
-        }
-        else
-        {
-            ttc = 1e3f; // Large number, in Python its "inf"
-        }
-
-        // Choose between normal vs urgent spacing gains based on TTC.
-        const bool urgent = (ttc < fmaxf(0.0f, params->ttc_panic_s));
-        const float k_dist = urgent ? params->k_dist_urgent : params->k_dist_normal;
-        const float k_vel = urgent ? params->k_vel_urgent : params->k_vel_normal;
-
-        // Deadzones to prevent small errors from causing oscillations in local setpoint.
-        if (fabsf(dist_error) < fmaxf(0.0f, params->dist_err_deadband_m))
-        {
-            dist_error = 0.0f;
-        }
-        if (fabsf(speed_diff) < fmaxf(0.0f, params->vel_diff_deadband_mps))
-        {
-            speed_diff = 0.0f;
-        }
-
-        float d_sp = (k_dist * dist_error) + (k_vel * speed_diff);
+        float d_sp = (params->k_dist * dist_error) + params->k_vel * speed_diff;
         if (dist_error < 0.0f)
             d_sp = 4.0f * d_sp;
 
@@ -223,23 +197,22 @@ VC_Err_t vehicle_controller_step(vehicle_controller_t *ctrl,
         base_sp = fminf(base_sp, params->speed_sp_max_mps);
         base_sp = fmaxf(base_sp, params->speed_sp_min_mps);
     }
-    // TTC calculation (when no valid distance or we're leader)
-    if (!((params->platoon_index > 0) && (in->distance_to_front_m > 0.0f)))
+
+    // TTC calculation
+    if ((in->distance_to_front_m > 0.0f) && (speed_diff < -0.1f))
     {
-        if ((in->distance_to_front_m > 0.0f) && (speed_diff_raw < -0.1f))
-        {
-            ttc = in->distance_to_front_m / (-1.0f * speed_diff_raw);
-        }
-        else
-        {
-            ttc = 1e3f;
-        }
+        ttc = in->distance_to_front_m / (-1.0f * speed_diff);
+    }
+    else
+    {
+        ttc = 1e3f; // Large number, in Python its "inf" 
     }
 
-    const float u = (float)pid_run(&(ctrl->speed_pid), base_sp, in->speed_mps);
-    throttle = u;
-    if (throttle < 0.0f) throttle = 0.0f;
-    else if (throttle > 1.0f) throttle = 1.0f;
+    throttle = (float)pid_run(&(ctrl->speed_pid), base_sp, in->speed_mps);
+    if (throttle < 0.0f)
+        throttle = 0.0f;
+    else if (throttle > 1.0f)
+        throttle = 1.0f;
     // =======================================================================
 
     // BRAKE COMPUTING
@@ -249,17 +222,7 @@ VC_Err_t vehicle_controller_step(vehicle_controller_t *ctrl,
     float brake = 0.0f;
     float desired_decel = 0.0f;
 
-    // Brake mapping is only allowed within a certain distance to the predecessor.
-    // However, if a brake "pulse" is already active (ctrl->brake_active), we keep
-    // using the mapping until the mapping logic itself decides the pulse is over.
-    const bool allow_brake_mapping =
-        params->brake_enable &&
-        (params->platoon_index > 0) &&
-        ((ctrl->brake_active) ||
-         ((in->distance_to_front_m > 0.0f) &&
-          ((params->brake_map_max_dist_m <= 0.0f) || (in->distance_to_front_m <= params->brake_map_max_dist_m))));
-
-    if (allow_brake_mapping)
+    if (params->brake_enable)
     {
         // Gate checks
         bool too_close_on, too_close_off,
@@ -320,9 +283,8 @@ VC_Err_t vehicle_controller_step(vehicle_controller_t *ctrl,
         {
             if (!ctrl->brake_active)
             {
-                // Do not reset the PID state here; we want gain-scheduling changes
-                // (and any future transitions) to be bumpless and avoid output jumps.
                 ctrl->brake_active = true;
+                pid_reset(&(ctrl->speed_pid));
             }
 
             // 3 different braking levels
@@ -413,29 +375,16 @@ VC_Err_t vehicle_controller_step(vehicle_controller_t *ctrl,
     ctrl->have_last_step_tick = true;
 
     // Write outputs
-    // Outside the mapping range, fall back to signed PID throttle/brake.
-    if (!allow_brake_mapping)
+    out->brake_cmd = brake;
+    out->desired_decel_mps2 = desired_decel;
+    out->effective_speed_sp_mps = base_sp;
+    if (brake > 0.0f)
     {
-        const float th_u = fmaxf(0.0f, fminf(1.0f, u));
-        const float br_u = fmaxf(0.0f, fminf(1.0f, -u));
-        out->throttle_cmd = th_u;
-        out->brake_cmd = br_u;
-        out->desired_decel_mps2 = br_u * fmaxf(0.0f, params->decel_full);
-        out->effective_speed_sp_mps = base_sp;
+        out->throttle_cmd = 0.0f;
     }
     else
     {
-        out->brake_cmd = brake;
-        out->desired_decel_mps2 = desired_decel;
-        out->effective_speed_sp_mps = base_sp;
-        if (brake > 0.0f)
-        {
-            out->throttle_cmd = 0.0f;
-        }
-        else
-        {
-            out->throttle_cmd = throttle;
-        }
+        out->throttle_cmd = throttle;
     }
 
     return VC_OK;
