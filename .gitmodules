@@ -3,5 +3,5 @@
 	url = https://github.com/micro-ROS/micro_ros_stm32cubemx_utils.git
 	branch = humble
 [submodule "Lib/pid-stm32"]
-	path = Lib/pid-stm32
+	path = Lib/pid_stm32
 	url = git@gitlab.ikerlan.es:STS/archived/old-tfm/tfm-jcasal/pid-stm32.git
